@@ -695,10 +695,9 @@ function runRichDialog(
 				if (allAnswered()) {
 					add(" ", theme.fg("success", "Enter to submit"));
 				} else {
-					const missing = questions
-						.filter((_, i) => !isAnswered(states[i]))
-						.map((_, i) => chips[i])
-						.join(", ");
+					// Filter the chips directly: filtering `questions` first would re-index
+					// the array and make the chip lookup point at the wrong question.
+					const missing = chips.filter((_, i) => !isAnswered(states[i])).join(", ");
 					add(" ", theme.fg("warning", `Unanswered: ${missing}`));
 				}
 			}
