@@ -4,19 +4,24 @@
  * Header: gradient ASCII banner (adapted from davis7's ui-customization),
  *         re-paletted to gruvbox yellow -> orange -> red, left-justified, with
  *         a stoic quote in a right-hand column.
- *         Art is switchable at runtime with `/logo <name>`, quote with `/quote`.
+ *         Art is toggleable with `/logo on|off|<name>`, quotes with `/quote on|off`.
+ *         UI preferences persist in `~/.pi/agent/gruvbox-dashboard.json`.
  * Footer: mimics the oh-my-zsh `geoffgarside` prompt:
  *
- *   [14:23:05] rv:termios git:(main)          42% · claude-fable-5 · high
+ *   [14:23:05] rv:termios git:(main)  ctx 84k/200k (42%) · claude-fable-5 · high
  *
  * Left side follows the zsh theme (aqua user, green dir, yellow git:(...)).
- * Right side: context percentage · model id · thinking effort. No cost.
+ * Right side: current/max context tokens (percentage) · model id · thinking effort. No cost.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	getAgentDir,
+	type ExtensionAPI,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type Rgb = [number, number, number];
@@ -106,7 +111,47 @@ const LOGOS: Record<string, readonly string[]> = {
 };
 
 const DEFAULT_LOGO = "brand";
+const LOGO_ENABLED_BY_DEFAULT = false;
+const QUOTE_ENABLED_BY_DEFAULT = true;
+const DASHBOARD_CONFIG = join(getAgentDir(), "gruvbox-dashboard.json");
 let activeLogo = DEFAULT_LOGO;
+let logoVisible = LOGO_ENABLED_BY_DEFAULT;
+let quoteVisible = QUOTE_ENABLED_BY_DEFAULT;
+
+function loadDashboardConfig() {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(DASHBOARD_CONFIG, "utf8"));
+		if (!parsed || typeof parsed !== "object") return;
+		const config = parsed as Record<string, unknown>;
+		const logo = config.logo;
+		if (logo && typeof logo === "object") {
+			const settings = logo as Record<string, unknown>;
+			if (typeof settings.name === "string" && settings.name in LOGOS) activeLogo = settings.name;
+			if (typeof settings.enabled === "boolean") logoVisible = settings.enabled;
+		}
+		const quote = config.quote;
+		if (quote && typeof quote === "object") {
+			const settings = quote as Record<string, unknown>;
+			if (typeof settings.enabled === "boolean") quoteVisible = settings.enabled;
+		}
+	} catch {
+		// Missing or invalid config falls back to the defaults above.
+	}
+}
+
+function saveDashboardConfig() {
+	try {
+		mkdirSync(dirname(DASHBOARD_CONFIG), { recursive: true });
+		const config = {
+			logo: { enabled: logoVisible, name: activeLogo },
+			quote: { enabled: quoteVisible },
+		};
+		writeFileSync(DASHBOARD_CONFIG, `${JSON.stringify(config, null, "\t")}\n`);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 /** Rows below which the 2x art crowds out the conversation. */
 const LARGE_LOGO_MIN_ROWS = 40;
@@ -127,6 +172,7 @@ function double(lines: readonly string[]): string[] {
  * An explicit `/logo brand-large` always wins.
  */
 function resolveLogo(): readonly string[] {
+	if (!logoVisible) return [];
 	const lines = LOGOS[activeLogo] ?? LOGOS[DEFAULT_LOGO]!;
 	if ((process.stdout.rows ?? 24) < LARGE_LOGO_MIN_ROWS) return lines;
 	if (activeLogo === "brand") return LOGOS["brand-large"]!;
@@ -306,12 +352,22 @@ function shortDir(cwd: string) {
 	return cwd === homedir() ? "~" : basename(cwd);
 }
 
+/** Compact token count that keeps the footer useful on narrow terminals. */
+function formatTokens(count: number) {
+	if (count < 1_000) return count.toString();
+	if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
+	if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
+	if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+	return `${Math.round(count / 1_000_000)}M`;
+}
+
 export default function gruvboxDashboard(pi: ExtensionAPI) {
 	let headerTui: { requestRender(): void } | undefined;
 
 	function install(ctx: ExtensionContext) {
 		if (ctx.mode !== "tui") return;
 
+		loadDashboardConfig();
 		const user = userInfo().username;
 		const dir = shortDir(ctx.cwd);
 
@@ -324,10 +380,21 @@ export default function gruvboxDashboard(pi: ExtensionAPI) {
 			return {
 				render(width: number) {
 					const art = resolveLogo();
+					if (art.length === 0) {
+						const quoteWidth = Math.min(QUOTE_MAX_WIDTH, width - INDENT - 1);
+						const quoteLines =
+							quoteVisible && currentQuote && quoteWidth >= QUOTE_MIN_WIDTH
+								? quoteBlock(currentQuote, quoteWidth, 4)
+								: [];
+						return quoteLines.length > 0
+							? ["", ...quoteLines.map((line) => " ".repeat(INDENT) + line), ""]
+							: [];
+					}
+
 					const artWidth = Math.max(...art.map((line) => visibleWidth(line)));
 					const columnWidth = Math.min(QUOTE_MAX_WIDTH, width - INDENT - artWidth - GAP - 1);
 					const quoteLines =
-						currentQuote && columnWidth >= QUOTE_MIN_WIDTH
+						quoteVisible && currentQuote && columnWidth >= QUOTE_MIN_WIDTH
 							? quoteBlock(currentQuote, columnWidth, art.length)
 							: [];
 
@@ -364,12 +431,16 @@ export default function gruvboxDashboard(pi: ExtensionAPI) {
 					let left = `[${time}] ${fg(AQUA, user)}:${fg(GREEN, dir)}`;
 					if (branch) left += ` ${fg(YELLOW, `git:(${branch})`)}`;
 
-					// Right: ctx% · model · effort
+					// Right: current/max context tokens (percentage) · model · effort
 					const usage = ctx.getContextUsage();
-					const pct = usage?.percent != null ? `${Math.round(usage.percent)}%` : "–";
+					const currentTokens = usage?.tokens != null ? formatTokens(usage.tokens) : "?";
+					const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow;
+					const maxTokens = contextWindow ? formatTokens(contextWindow) : "?";
+					const pct = usage?.percent != null ? `${Math.round(usage.percent)}%` : "?";
+					const context = `ctx ${currentTokens}/${maxTokens} (${pct})`;
 					const model = ctx.model?.id ?? "no-model";
 					const effort = ctx.model?.reasoning ? pi.getThinkingLevel() : "off";
-					const right = fg(GRAY, `${pct} · ${model} · ${effort}`);
+					const right = fg(GRAY, `${context} · ${model} · ${effort}`);
 
 					const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
 					return [truncateToWidth(`${left}${" ".repeat(pad)}${right}`, width)];
@@ -381,9 +452,28 @@ export default function gruvboxDashboard(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => install(ctx));
 
 	pi.registerCommand("quote", {
-		description: "Draw another stoic quote (`refresh` refetches the pool)",
+		description: "Toggle or draw another stoic quote (on, off, refresh)",
+		getArgumentCompletions: (prefix) =>
+			["on", "off", "refresh"]
+				.filter((name) => name.startsWith(prefix))
+				.map((name) => ({ value: name, label: name })),
 		handler: async (args, ctx) => {
-			if (args.trim() === "refresh") {
+			const action = args.trim();
+			if (action === "on" || action === "off") {
+				quoteVisible = action === "on";
+				const saved = saveDashboardConfig();
+				headerTui?.requestRender();
+				ctx.ui.notify(
+					`Quote: ${action}${saved ? "" : " (could not save preference)"}`,
+					saved ? "info" : "warning",
+				);
+				return;
+			}
+			if (action && action !== "refresh") {
+				ctx.ui.notify(`Unknown quote option "${action}" — try: on, off, refresh`, "warning");
+				return;
+			}
+			if (action === "refresh") {
 				const fetched = await fetchQuotes().catch(() => []);
 				if (fetched.length === 0) {
 					ctx.ui.notify("Could not reach stoic-quotes.com", "warning");
@@ -401,20 +491,38 @@ export default function gruvboxDashboard(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("logo", {
-		description: `Switch the header banner (${Object.keys(LOGOS).join(", ")})`,
+		description: `Toggle or switch the header logo (on, off, ${Object.keys(LOGOS).join(", ")})`,
+		getArgumentCompletions: (prefix) =>
+			["on", "off", ...Object.keys(LOGOS)]
+				.filter((name) => name.startsWith(prefix))
+				.map((name) => ({ value: name, label: name })),
 		handler: async (args, ctx) => {
 			const name = args.trim();
 			if (!name) {
-				ctx.ui.notify(`Logo: ${activeLogo} — available: ${Object.keys(LOGOS).join(", ")}`, "info");
+				const state = logoVisible ? activeLogo : "off";
+				ctx.ui.notify(`Logo: ${state} — available: on, off, ${Object.keys(LOGOS).join(", ")}`, "info");
 				return;
 			}
-			if (!(name in LOGOS)) {
-				ctx.ui.notify(`Unknown logo "${name}" — try: ${Object.keys(LOGOS).join(", ")}`, "warning");
+			if (name === "off") {
+				logoVisible = false;
+			} else if (name === "on") {
+				logoVisible = true;
+			} else if (name in LOGOS) {
+				activeLogo = name;
+				logoVisible = true;
+			} else {
+				ctx.ui.notify(
+					`Unknown logo "${name}" — try: on, off, ${Object.keys(LOGOS).join(", ")}`,
+					"warning",
+				);
 				return;
 			}
-			activeLogo = name;
+			const saved = saveDashboardConfig();
 			headerTui?.requestRender();
-			ctx.ui.notify(`Logo: ${name}`, "info");
+			ctx.ui.notify(
+				`Logo: ${logoVisible ? activeLogo : "off"}${saved ? "" : " (could not save preference)"}`,
+				saved ? "info" : "warning",
+			);
 		},
 	});
 
