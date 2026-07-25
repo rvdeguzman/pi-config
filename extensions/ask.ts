@@ -302,6 +302,10 @@ function runRichDialog(
 		let submitCursor = 0;
 		let editMode: { kind: "other" | "note"; rowKey: string; label: string } | undefined;
 		let cachedLines: string[] | undefined;
+		/// The width `cachedLines` was laid out for. A resize changes nothing the
+		/// dialog would call `refresh()` for, so without this the cache hands back
+		/// lines wider than the terminal and pi-tui's render guard kills the process.
+		let cachedWidth: number | undefined;
 		let settled = false;
 		let deadline: number | undefined = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
 		let timeoutId: NodeJS.Timeout | undefined;
@@ -569,9 +573,8 @@ function runRichDialog(
 		// -------------------------------------------------------------------
 
 		function render(width: number): string[] {
-			if (cachedLines) return cachedLines;
-
 			const w = Math.max(20, width);
+			if (cachedLines && cachedWidth === w) return cachedLines;
 			const lines: string[] = [];
 
 			const push = (text: string) => lines.push(...wrapTextWithAnsi(text, w));
@@ -623,6 +626,7 @@ function runRichDialog(
 			lines.push(theme.fg("borderAccent", "─".repeat(w)));
 
 			cachedLines = lines;
+			cachedWidth = w;
 			return lines;
 
 			// ----- bodies -----

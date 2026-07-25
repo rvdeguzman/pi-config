@@ -244,7 +244,6 @@ await test("12a. Narrow rendering clamps a long question and keeps every line wi
 		(component, render) => {
 			at40 = render(40);
 			fits40 = allLinesFit(component, 40);
-			component.invalidate();
 			at30 = render(30);
 			fits30 = allLinesFit(component, 30);
 			type(component, K.enter);
@@ -269,7 +268,6 @@ await test("12b. Very long Other input is ellipsized in the option row", async (
 		type(component, K.left); // Return to Storage tab where custom value is shown under Other.
 		customAt40 = render(40);
 		fits40 = allLinesFit(component, 40);
-		component.invalidate();
 		customAt30 = render(30);
 		fits30 = allLinesFit(component, 30);
 		check("long custom row contains ellipsis at width 40", customAt40.includes("…") && !customAt40.includes(custom), customAt40);
