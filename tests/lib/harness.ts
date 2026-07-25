@@ -26,6 +26,13 @@ export function check(name: string, condition: boolean, extra?: unknown): void {
 	console.log(`  FAIL ${name}${extra === undefined ? "" : `: ${formatExtra(extra)}`}`);
 }
 
+/** JSON-shape equality, reporting both sides when they differ. */
+export function checkEquals(name: string, actual: unknown, expected: unknown): void {
+	const got = JSON.stringify(actual);
+	const want = JSON.stringify(expected);
+	check(name, got === want, got === want ? undefined : `expected ${want}, got ${got}`);
+}
+
 function formatExtra(extra: unknown): string {
 	if (extra instanceof Error) return extra.stack ?? extra.message;
 	if (typeof extra === "string") return extra;
