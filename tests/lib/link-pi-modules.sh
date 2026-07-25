@@ -42,9 +42,24 @@ if [[ ! -d "$pi_pkg/node_modules/@earendil-works/pi-tui" ]]; then
 	exit 1
 fi
 
+link_module() {
+	local target="$1"
+	local destination="$2"
+	if ln -sfn "$target" "$destination" 2>/dev/null; then
+		return
+	fi
+	# Parallel suites can race to create the same link. Treat the losing ln as
+	# success only when the winner installed exactly the link we wanted.
+	if [[ -L "$destination" && "$(readlink "$destination")" == "$target" ]]; then
+		return
+	fi
+	echo "error: could not link $destination to $target" >&2
+	return 1
+}
+
 mkdir -p "$modules/@earendil-works"
-ln -sfn "$pi_pkg" "$modules/@earendil-works/pi-coding-agent"
-ln -sfn "$pi_pkg/node_modules/@earendil-works/pi-tui" "$modules/@earendil-works/pi-tui"
-ln -sfn "$pi_pkg/node_modules/typebox" "$modules/typebox"
+link_module "$pi_pkg" "$modules/@earendil-works/pi-coding-agent"
+link_module "$pi_pkg/node_modules/@earendil-works/pi-tui" "$modules/@earendil-works/pi-tui"
+link_module "$pi_pkg/node_modules/typebox" "$modules/typebox"
 
 echo "pi $(node -e 'console.log(require(process.argv[1] + "/package.json").version)' "$pi_pkg") — $pi_pkg"
