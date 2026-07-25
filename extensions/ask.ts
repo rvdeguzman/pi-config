@@ -28,6 +28,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	getAgentDir,
+	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
 	Editor,
@@ -852,11 +853,12 @@ const PROMPT_GUIDELINES = [
 ];
 
 // ---------------------------------------------------------------------------
-// Extension
+// Tool definition
 // ---------------------------------------------------------------------------
 
-export default function ask(pi: ExtensionAPI) {
-	pi.registerTool({
+/** Exported so tests can exercise the tool without going through registration. */
+export function createAskTool(): ToolDefinition<typeof AskParams> {
+	return {
 		name: "ask",
 		label: "Ask",
 		description: TOOL_DESCRIPTION,
@@ -999,5 +1001,27 @@ export default function ask(pi: ExtensionAPI) {
 
 			return new Text(lines.join("\n"), 0, 0);
 		},
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Extension
+// ---------------------------------------------------------------------------
+
+/**
+ * Registration is gated on `ctx.hasUI` rather than only guarding `execute`.
+ *
+ * Print/JSON mode and headless subagent children have no way to answer a
+ * question, so advertising `ask` there just invites the model to burn a turn on
+ * a call that can only fail. Registering from `session_start` is supported and
+ * refreshes the tool list immediately, so the tool is callable on the first
+ * turn of an interactive session.
+ */
+export default function ask(pi: ExtensionAPI) {
+	let registered = false;
+	pi.on("session_start", (_event, ctx) => {
+		if (registered || !ctx.hasUI) return;
+		registered = true;
+		pi.registerTool(createAskTool());
 	});
 }

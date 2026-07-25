@@ -1,8 +1,7 @@
-import askExtension from "../../extensions/ask.ts";
+import { createAskTool } from "../../extensions/ask.ts";
 import { K, check, driveDialog, report, test, type } from "./harness.ts";
 
-let askTool: any;
-askExtension({ registerTool: (definition: any) => (askTool = definition) } as any);
+const askTool: any = createAskTool();
 
 const baseQuestion = (overrides: Record<string, unknown> = {}) => ({
 	id: "storage",

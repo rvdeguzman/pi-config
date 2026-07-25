@@ -1,10 +1,9 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import askExtension from "../../extensions/ask.ts";
+import { createAskTool } from "../../extensions/ask.ts";
 import { K, check, driveDialog, report, test, type } from "./harness.ts";
 
-let askTool: any;
-askExtension({ registerTool: (definition: any) => (askTool = definition) } as any);
+const askTool: any = createAskTool();
 
 const TEMP_ROOT = "/tmp/ask-timeout-tests";
 const GLOBAL_DIR = join(TEMP_ROOT, "global");

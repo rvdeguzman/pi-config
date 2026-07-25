@@ -1,9 +1,8 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import askExtension from "../../extensions/ask.ts";
+import { createAskTool } from "../../extensions/ask.ts";
 import { K, check, driveDialog, report, screen, test, type, type DialogComponent } from "./harness.ts";
 
-let askTool: any;
-askExtension({ registerTool: (definition: any) => (askTool = definition) } as any);
+const askTool: any = createAskTool();
 
 const storage = (overrides: Record<string, unknown> = {}) => ({
 	id: "storage",

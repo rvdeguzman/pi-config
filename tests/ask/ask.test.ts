@@ -1,9 +1,7 @@
 /** Headless tests for ~/.pi/agent/extensions/ask.ts via the RPC fallback path. */
-import askExtension from "../../extensions/ask.ts";
+import askExtension, { createAskTool } from "../../extensions/ask.ts";
 
-let captured: any;
-const fakePi: any = { registerTool: (def: any) => (captured = def) };
-askExtension(fakePi);
+const captured: any = createAskTool();
 
 let failures = 0;
 function check(name: string, cond: boolean, extra?: unknown) {
@@ -212,6 +210,46 @@ console.log("\nrenderers");
 		{},
 	);
 	check("renderResult marks timeout", JSON.stringify(timed).includes("⏱"), JSON.stringify(timed));
+}
+
+console.log("\nregistration gating");
+{
+	/** Fake ExtensionAPI capturing session_start handlers and registrations. */
+	function fakePi() {
+		const handlers: any[] = [];
+		const registered: string[] = [];
+		return {
+			api: {
+				on: (event: string, handler: any) => {
+					if (event === "session_start") handlers.push(handler);
+				},
+				registerTool: (def: any) => registered.push(def.name),
+			} as any,
+			fire: (hasUI: boolean) => handlers.forEach((h) => h({}, { hasUI })),
+			registered,
+			handlerCount: () => handlers.length,
+		};
+	}
+
+	const headless = fakePi();
+	askExtension(headless.api);
+	check("does not register at load time", headless.registered.length === 0, headless.registered);
+	check("subscribes to session_start", headless.handlerCount() === 1);
+	headless.fire(false);
+	check("headless session registers nothing", headless.registered.length === 0, headless.registered);
+
+	const ui = fakePi();
+	askExtension(ui.api);
+	ui.fire(true);
+	check("UI session registers ask", ui.registered.join() === "ask", ui.registered);
+	ui.fire(true);
+	check("repeat session_start does not double-register", ui.registered.length === 1, ui.registered);
+
+	const late = fakePi();
+	askExtension(late.api);
+	late.fire(false);
+	late.fire(true);
+	check("headless then UI still registers", late.registered.join() === "ask", late.registered);
 }
 
 console.log(failures === 0 ? "\nAll checks passed.\n" : `\n${failures} check(s) failed.\n`);
