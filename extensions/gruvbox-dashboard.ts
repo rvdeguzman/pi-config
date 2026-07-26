@@ -6,22 +6,38 @@
  *         a stoic quote in a right-hand column.
  *         Art is toggleable with `/logo on|off|<name>`, quotes with `/quote on|off`.
  *         UI preferences persist in `~/.pi/agent/gruvbox-dashboard.json`.
- * Footer: mimics the oh-my-zsh `geoffgarside` prompt:
+ * Bottom bar: a seated status block, not a shell prompt. A hairline rule closes
+ *         the transcript, then pi's own editor, then two aligned rows and an LED
+ *         ticker styled after a Japanese station board:
  *
- *   [14:23:05] rv:termios git:(main)  ctx 84k/200k (42%) · claude-fable-5 · high
+ *   ─────────────────────────────────────────────────────────────────────
+ *   ╭───────────────────────────────────────────────────────────────────╮
+ *   │ …                                                                 │
+ *   ╰───────────────────────────────────────────────────────────────────╯
+ *   termios  ▐ ▶ read footer.js… ▌                84k/200k (42%) · $0.42
+ *   main · tui-look                                 claude-fable-5 · high
  *
- * Left side follows the zsh theme (aqua user, green dir, yellow git:(...)).
- * Right side: current/max context tokens (percentage) · model id · thinking effort. No cost.
+ * The fixed columns answer *where* and *how much*. A deliberately narrow
+ * station display immediately after the directory carries everything that does
+ * not deserve a fixed slot (live tool activity, extension statuses, session
+ * totals, the stoic quote), keeping the notices in motion without a third row.
+ * `/ticker on|off|speed <cps>` controls it, and the preference persists.
+ *
+ * Deliberately absent: a wall clock and the `user:dir git:(branch)` shape — a
+ * persistent status line is not a prompt, and neither datum ever changes.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
+	CustomEditor,
 	getAgentDir,
 	type ExtensionAPI,
 	type ExtensionContext,
+	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type Rgb = [number, number, number];
@@ -29,11 +45,29 @@ type Rgb = [number, number, number];
 const RESET = "\x1b[0m";
 
 // --- Gruvbox (dark, bright variants) ---
-const AQUA: Rgb = [142, 192, 124]; // #8ec07c  (zsh cyan -> user)
-const GREEN: Rgb = [184, 187, 38]; // #b8bb26  (dir)
-const YELLOW: Rgb = [250, 189, 47]; // #fabd2f (git:(...))
-const GRAY: Rgb = [146, 131, 116]; // #928374  (right-side info)
-const FG3: Rgb = [168, 153, 132]; // #a89984  (quote body)
+const RED: Rgb = [251, 73, 52]; // #fb4934
+const GREEN: Rgb = [184, 187, 38]; // #b8bb26
+const YELLOW: Rgb = [250, 189, 47]; // #fabd2f  (branch, high effort)
+const ORANGE: Rgb = [254, 128, 25]; // #fe8019  (ticker LEDs, accent)
+const AMBER: Rgb = [215, 153, 33]; // #d79921  (medium effort)
+const FG: Rgb = [235, 219, 178]; // #ebdbb2  (directory)
+const FG3: Rgb = [168, 153, 132]; // #a89984  (quote body, model id)
+const GRAY: Rgb = [146, 131, 116]; // #928374  (secondary info)
+const BG4: Rgb = [124, 111, 100]; // #7c6f64  (separators)
+const BG3: Rgb = [102, 92, 84]; // #665c54
+const BG2: Rgb = [80, 73, 69]; // #504945  (hairline seat)
+const BG0H: Rgb = [29, 32, 33]; // #1d2021  (ticker panel)
+
+/** Thinking effort borrows the theme's thinking* ramp: subtle -> loud. */
+const EFFORT_COLOR: Record<string, Rgb> = {
+	off: BG3,
+	minimal: GRAY,
+	low: FG3,
+	medium: AMBER,
+	high: YELLOW,
+	xhigh: ORANGE,
+	max: RED,
+};
 
 // Header layout: art hugs the left edge, quote sits in a column to its right.
 const INDENT = 2;
@@ -113,10 +147,21 @@ const LOGOS: Record<string, readonly string[]> = {
 const DEFAULT_LOGO = "brand";
 const LOGO_ENABLED_BY_DEFAULT = false;
 const QUOTE_ENABLED_BY_DEFAULT = true;
+const TICKER_ENABLED_BY_DEFAULT = true;
+/** Columns per second. Real platform boards run slow enough to read at a glance. */
+const TICKER_DEFAULT_SPEED = 8;
+const TICKER_MIN_SPEED = 1;
+const TICKER_MAX_SPEED = 30;
+/** Total width including `▐ ` and ` ▌`; 20 columns remain for the moving notice. */
+const TICKER_WIDTH = 24;
+/** Below this width the station display would be unreadable, so omit it. */
+const TICKER_MIN_WIDTH = 12;
 const DASHBOARD_CONFIG = join(getAgentDir(), "gruvbox-dashboard.json");
 let activeLogo = DEFAULT_LOGO;
 let logoVisible = LOGO_ENABLED_BY_DEFAULT;
 let quoteVisible = QUOTE_ENABLED_BY_DEFAULT;
+let tickerVisible = TICKER_ENABLED_BY_DEFAULT;
+let tickerSpeed = TICKER_DEFAULT_SPEED;
 
 function loadDashboardConfig() {
 	try {
@@ -134,6 +179,14 @@ function loadDashboardConfig() {
 			const settings = quote as Record<string, unknown>;
 			if (typeof settings.enabled === "boolean") quoteVisible = settings.enabled;
 		}
+		const ticker = config.ticker;
+		if (ticker && typeof ticker === "object") {
+			const settings = ticker as Record<string, unknown>;
+			if (typeof settings.enabled === "boolean") tickerVisible = settings.enabled;
+			if (typeof settings.speed === "number" && Number.isFinite(settings.speed)) {
+				tickerSpeed = clampSpeed(settings.speed);
+			}
+		}
 	} catch {
 		// Missing or invalid config falls back to the defaults above.
 	}
@@ -145,6 +198,7 @@ function saveDashboardConfig() {
 		const config = {
 			logo: { enabled: logoVisible, name: activeLogo },
 			quote: { enabled: quoteVisible },
+			ticker: { enabled: tickerVisible, speed: tickerSpeed },
 		};
 		writeFileSync(DASHBOARD_CONFIG, `${JSON.stringify(config, null, "\t")}\n`);
 		return true;
@@ -361,14 +415,196 @@ function formatTokens(count: number) {
 	return `${Math.round(count / 1_000_000)}M`;
 }
 
+function clampSpeed(speed: number) {
+	return Math.min(TICKER_MAX_SPEED, Math.max(TICKER_MIN_SPEED, Math.round(speed)));
+}
+
+/** Context fill runs green -> yellow -> orange -> red, matching the theme's warning ramp. */
+function heat(percent: number): Rgb {
+	if (percent < 50) return GREEN;
+	if (percent < 70) return YELLOW;
+	if (percent < 90) return ORANGE;
+	return RED;
+}
+
+/** Two-zone row: `left` flush left, `right` flush right, at least one column apart. */
+function row(left: string, right: string, width: number) {
+	const gap = width - visibleWidth(left) - visibleWidth(right);
+	if (gap < 1) return truncateToWidth(left, width, "…");
+	return left + " ".repeat(gap) + right;
+}
+
+// --- Session totals ---------------------------------------------------------
+//
+// Recomputed only when the session actually grows: the ticker repaints several
+// times a second and walking every entry per frame would be silly.
+
+interface Totals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cost: number;
+}
+
+let totalsCache: Totals | undefined;
+
+function invalidateTotals() {
+	totalsCache = undefined;
+}
+
+function sessionTotals(ctx: ExtensionContext): Totals {
+	if (totalsCache) return totalsCache;
+	const totals: Totals = { input: 0, output: 0, cacheRead: 0, cost: 0 };
+	for (const entry of ctx.sessionManager.getEntries()) {
+		const usage =
+			entry.type === "message"
+				? (entry.message as { usage?: Record<string, any> }).usage
+				: entry.type === "compaction" || entry.type === "branch_summary"
+					? (entry as { usage?: Record<string, any> }).usage
+					: undefined;
+		if (!usage) continue;
+		totals.input += usage.input ?? 0;
+		totals.output += usage.output ?? 0;
+		totals.cacheRead += usage.cacheRead ?? 0;
+		totals.cost += usage.cost?.total ?? 0;
+	}
+	totalsCache = totals;
+	return totals;
+}
+
+// --- Ticker -----------------------------------------------------------------
+//
+// A station board: one amber line that scrolls its notices past a fixed window.
+// Live tool activity takes the front while the agent works; when it goes quiet
+// the board falls back to service information (extension statuses, session
+// totals, the day's quote), exactly like a platform sign between trains.
+
+const TICKER_SEP = "  ✦  ";
+/** Blank run between the end of the notice loop and its restart. */
+const TICKER_GAP = "        ";
+
+interface Activity {
+	label: string;
+	startedAt: number;
+	done: boolean;
+}
+
+let activity: Activity | undefined;
+let working = false;
+let tickerOffset = 0;
+let tickerTimer: ReturnType<typeof setInterval> | undefined;
+let tickerScrolls = false;
+
+/** One-line status text, stripped of anything that would break a single row. */
+function sanitizeStatus(text: string) {
+	return text
+		.replace(/[\r\n\t]/g, " ")
+		.replace(/ +/g, " ")
+		.trim();
+}
+
+/** What a tool is doing, in as few columns as the board can get away with. */
+function describeTool(toolName: string, args: any): string {
+	const path = typeof args?.path === "string" ? basename(args.path) : undefined;
+	switch (toolName) {
+		case "read":
+		case "write":
+		case "edit":
+			return path ? `${toolName} ${path}` : toolName;
+		case "bash":
+			return typeof args?.command === "string"
+				? `bash ${truncateToWidth(sanitizeStatus(args.command), 48, "…")}`
+				: "bash";
+		case "grep":
+		case "find":
+			return typeof args?.pattern === "string" ? `${toolName} ${args.pattern}` : toolName;
+		default:
+			return path ? `${toolName} ${path}` : toolName;
+	}
+}
+
+function elapsed(since: number) {
+	const seconds = Math.floor((Date.now() - since) / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+/** The notices, in board order. Empty means the board stays dark. */
+function tickerNotices(ctx: ExtensionContext, statuses: ReadonlyMap<string, string>): string[] {
+	const notices: string[] = [];
+
+	if (activity && (working || !activity.done)) {
+		notices.push(`▶ ${activity.label} · ${elapsed(activity.startedAt)}`);
+	}
+
+	for (const [, text] of [...statuses.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+		const clean = sanitizeStatus(text);
+		if (clean) notices.push(clean);
+	}
+
+	const totals = sessionTotals(ctx);
+	if (totals.input || totals.output) {
+		const parts = [`${formatTokens(totals.input)} in`, `${formatTokens(totals.output)} out`];
+		if (totals.cacheRead) parts.push(`${formatTokens(totals.cacheRead)} cached`);
+		notices.push(parts.join(" · "));
+	}
+
+	if (quoteVisible && currentQuote) notices.push(`“${currentQuote.text}” — ${currentQuote.author}`);
+
+	return notices;
+}
+
+/**
+ * Slice `width` visible columns out of the notice loop starting at `offset`,
+ * wrapping around the end. Walks code points rather than indexing so wide
+ * glyphs (CJK, emoji in a status) never split the row's width accounting.
+ */
+function scrollWindow(text: string, offset: number, width: number): string {
+	const chars = [...text];
+	if (chars.length === 0) return "";
+	let out = "";
+	let used = 0;
+	let index = ((offset % chars.length) + chars.length) % chars.length;
+	while (used < width) {
+		const ch = chars[index]!;
+		const w = visibleWidth(ch);
+		if (used + w > width) break;
+		out += ch;
+		used += w;
+		index = (index + 1) % chars.length;
+	}
+	return out + " ".repeat(width - used);
+}
+
+/** The board itself: amber notices on a dark panel, framed by LED end caps. */
+function renderTicker(ctx: ExtensionContext, statuses: ReadonlyMap<string, string>, width: number) {
+	tickerScrolls = false;
+	if (!tickerVisible || width < TICKER_MIN_WIDTH) return undefined;
+
+	const notices = tickerNotices(ctx, statuses);
+	if (notices.length === 0) return undefined;
+
+	const inner = width - 4; // "▐ " + " ▌"
+	const text = notices.join(TICKER_SEP);
+	// This is intentionally a marquee, not a static status chip: even a short
+	// notice moves through the window, crosses the blank platform gap, and loops.
+	tickerScrolls = true;
+	const body = scrollWindow(text + TICKER_GAP, tickerOffset, inner);
+
+	const cap = (s: string) => `\x1b[38;2;${ORANGE[0]};${ORANGE[1]};${ORANGE[2]}m${s}`;
+	const panel = `\x1b[48;2;${BG0H[0]};${BG0H[1]};${BG0H[2]}m`;
+	const lit = `\x1b[38;2;${ORANGE[0]};${ORANGE[1]};${ORANGE[2]}m`;
+	return `${panel}${cap("▐")} ${lit}${body} ${cap("▌")}${RESET}`;
+}
+
 export default function gruvboxDashboard(pi: ExtensionAPI) {
 	let headerTui: { requestRender(): void } | undefined;
+	let footerTui: { requestRender(): void } | undefined;
 
 	function install(ctx: ExtensionContext) {
 		if (ctx.mode !== "tui") return;
 
 		loadDashboardConfig();
-		const user = userInfo().username;
 		const dir = shortDir(ctx.cwd);
 
 		ctx.ui.setTitle(`pi · ${dir}`);
@@ -414,42 +650,131 @@ export default function gruvboxDashboard(pi: ExtensionAPI) {
 			};
 		});
 
+		// A hairline closes the transcript and seats the editor, so the bottom of
+		// the screen reads as one block instead of a prompt with a box above it.
+		class SeatedEditor extends CustomEditor {
+			constructor(tui: TUI, editorTheme: EditorTheme, keybindings: KeybindingsManager) {
+				super(tui, editorTheme, keybindings);
+			}
+
+			render(width: number): string[] {
+				return [fg(BG2, "─".repeat(Math.max(0, width))), ...super.render(width)];
+			}
+		}
+
+		ctx.ui.setEditorComponent(
+			(tui, editorTheme, keybindings) => new SeatedEditor(tui, editorTheme, keybindings),
+		);
+
 		ctx.ui.setFooter((tui, _theme, footerData) => {
+			footerTui = tui;
 			const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
-			const clock = setInterval(() => tui.requestRender(), 1000);
+			startTicker();
 
 			return {
 				dispose() {
 					unsubBranch();
-					clearInterval(clock);
+					stopTicker();
+					footerTui = undefined;
 				},
 				invalidate() {},
 				render(width: number) {
-					// Left: [HH:MM:SS] user:dir git:(branch)
-					const time = new Date().toTimeString().slice(0, 8);
-					const branch = footerData.getGitBranch();
-					let left = `[${time}] ${fg(AQUA, user)}:${fg(GREEN, dir)}`;
-					if (branch) left += ` ${fg(YELLOW, `git:(${branch})`)}`;
-
-					// Right: current/max context tokens (percentage) · model · effort
 					const usage = ctx.getContextUsage();
-					const currentTokens = usage?.tokens != null ? formatTokens(usage.tokens) : "?";
 					const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow;
-					const maxTokens = contextWindow ? formatTokens(contextWindow) : "?";
-					const pct = usage?.percent != null ? `${Math.round(usage.percent)}%` : "?";
-					const context = `ctx ${currentTokens}/${maxTokens} (${pct})`;
-					const model = ctx.model?.id ?? "no-model";
-					const effort = ctx.model?.reasoning ? pi.getThinkingLevel() : "off";
-					const right = fg(GRAY, `${context} · ${model} · ${effort}`);
+					const totals = sessionTotals(ctx);
 
-					const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-					return [truncateToWidth(`${left}${" ".repeat(pad)}${right}`, width)];
+					// Row 1 — where you are : how full the window is.
+					const tokens = usage?.tokens != null ? formatTokens(usage.tokens) : "?";
+					const windowTokens = contextWindow ? formatTokens(contextWindow) : "?";
+					const percent = usage?.percent ?? null;
+					// Each span is coloured on its own: a nested reset would drop the
+					// surrounding colour mid-line.
+					const contextRight =
+						fg(GRAY, `${tokens}/${windowTokens} `) +
+						fg(heat(percent ?? 0), `(${percent == null ? "?" : Math.round(percent)}%)`) +
+						(totals.cost > 0 ? fg(BG4, " · ") + fg(GRAY, `$${totals.cost.toFixed(2)}`) : "");
+
+					// Row 2 — which branch : which brain.
+					const branch = footerData.getGitBranch();
+					const sessionName = ctx.sessionManager.getSessionName();
+					const placeLeft =
+						(branch ? fg(YELLOW, branch) : fg(BG3, "no branch")) +
+						(sessionName ? fg(BG4, " · ") + fg(GRAY, sessionName) : "");
+					const effort = ctx.model?.reasoning ? pi.getThinkingLevel() : "off";
+					const modelRight =
+						fg(FG3, ctx.model?.id ?? "no-model") +
+						fg(BG4, " · ") +
+						fg(EFFORT_COLOR[effort] ?? GRAY, effort);
+
+					// The board gets a deliberately tiny window immediately after the
+					// directory. It yields first on narrow terminals so the fixed context
+					// status remains readable.
+					const dirText = fg(FG, dir);
+					const roomForBoard = width - visibleWidth(dirText) - visibleWidth(contextRight) - 4;
+					const boardWidth = Math.min(TICKER_WIDTH, roomForBoard);
+					const board = renderTicker(
+						ctx,
+						footerData.getExtensionStatuses(),
+						boardWidth,
+					);
+					const topLeft = board ? `${dirText}  ${board}` : dirText;
+
+					return [row(topLeft, contextRight, width), row(placeLeft, modelRight, width)];
 				},
 			};
 		});
 	}
 
+	// --- Ticker clock --------------------------------------------------------
+	//
+	// Only runs while something is actually scrolling: a board holding a short
+	// static notice repaints on events like the rest of the footer.
+
+	function startTicker() {
+		stopTicker();
+		if (!tickerVisible) return;
+		tickerTimer = setInterval(() => {
+			if (!tickerScrolls) return;
+			tickerOffset += 1;
+			footerTui?.requestRender();
+		}, Math.round(1000 / tickerSpeed));
+	}
+
+	function stopTicker() {
+		if (tickerTimer) clearInterval(tickerTimer);
+		tickerTimer = undefined;
+	}
+
 	pi.on("session_start", (_event, ctx) => install(ctx));
+	pi.on("session_shutdown", () => {
+		stopTicker();
+		footerTui = undefined;
+	});
+
+	// Board content: live tool activity while working, service info when idle.
+	pi.on("agent_start", () => {
+		working = true;
+		tickerOffset = 0;
+	});
+	pi.on("agent_end", () => {
+		working = false;
+		activity = undefined;
+		invalidateTotals();
+		footerTui?.requestRender();
+	});
+	pi.on("tool_execution_start", (event) => {
+		activity = { label: describeTool(event.toolName, event.args), startedAt: Date.now(), done: false };
+		tickerOffset = 0;
+		footerTui?.requestRender();
+	});
+	pi.on("tool_execution_end", () => {
+		if (activity) activity.done = true;
+	});
+	pi.on("message_end", () => {
+		invalidateTotals();
+		footerTui?.requestRender();
+	});
+	pi.on("session_compact", () => invalidateTotals());
 
 	pi.registerCommand("quote", {
 		description: "Toggle or draw another stoic quote (on, off, refresh)",
@@ -526,12 +851,56 @@ export default function gruvboxDashboard(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("ticker", {
+		description: "Station-board ticker: /ticker [on|off|speed <columns per second>]",
+		getArgumentCompletions: (prefix) =>
+			["on", "off", "speed"]
+				.filter((name) => name.startsWith(prefix))
+				.map((name) => ({ value: name, label: name })),
+		handler: async (args, ctx) => {
+			const [action, value] = args.trim().split(/\s+/);
+
+			if (!action) {
+				ctx.ui.notify(
+					`Ticker: ${tickerVisible ? `on, ${tickerSpeed} cols/s` : "off"} — try: on, off, speed <${TICKER_MIN_SPEED}-${TICKER_MAX_SPEED}>`,
+					"info",
+				);
+				return;
+			}
+
+			if (action === "on" || action === "off") {
+				tickerVisible = action === "on";
+				tickerOffset = 0;
+			} else if (action === "speed") {
+				const parsed = Number(value);
+				if (!Number.isFinite(parsed)) {
+					ctx.ui.notify(`/ticker speed needs a number (${TICKER_MIN_SPEED}-${TICKER_MAX_SPEED})`, "warning");
+					return;
+				}
+				tickerSpeed = clampSpeed(parsed);
+			} else {
+				ctx.ui.notify(`Unknown ticker option "${action}" — try: on, off, speed <n>`, "warning");
+				return;
+			}
+
+			const saved = saveDashboardConfig();
+			startTicker();
+			footerTui?.requestRender();
+			ctx.ui.notify(
+				`Ticker: ${tickerVisible ? `on, ${tickerSpeed} cols/s` : "off"}${saved ? "" : " (could not save preference)"}`,
+				saved ? "info" : "warning",
+			);
+		},
+	});
+
 	pi.registerCommand("dashboard-off", {
-		description: "Restore built-in header and footer",
+		description: "Restore built-in header, footer, and editor",
 		handler: async (_args, ctx) => {
+			stopTicker();
 			ctx.ui.setHeader(undefined);
 			ctx.ui.setFooter(undefined);
-			ctx.ui.notify("Built-in header/footer restored", "info");
+			ctx.ui.setEditorComponent(undefined);
+			ctx.ui.notify("Built-in header/footer/editor restored", "info");
 		},
 	});
 }
