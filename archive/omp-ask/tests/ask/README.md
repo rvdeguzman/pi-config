@@ -9,7 +9,7 @@ multi-question dialog, timeout auto-select).
 bun run notes.test.ts     # one suite, full output
 ```
 
-`run.sh` calls [`../lib/link-pi-modules.sh`](../lib/link-pi-modules.sh), which links
+`run.sh` calls [`pi/tests/lib/link-pi-modules.sh`](../../../../tests/lib/link-pi-modules.sh), which links
 `pi/node_modules` (gitignored) at the globally installed pi so `bun` can resolve
 `@earendil-works/*` from inside `ask.ts`. Nothing is vendored — the suites always
 run against whatever pi version is installed.
@@ -25,7 +25,7 @@ run against whatever pi version is installed.
 
 ## How they work
 
-There is no TUI here. [`../lib/harness.ts`](../lib/harness.ts) fakes `ctx.ui.custom()`, grabs the live
+There is no TUI here. [`pi/tests/lib/harness.ts`](../../../../tests/lib/harness.ts) fakes `ctx.ui.custom()`, grabs the live
 component, and types raw terminal escape sequences (`\x1b[A`, `\r`, …) straight
 into `handleInput()`, asserting on ANSI-stripped `render()` output.
 

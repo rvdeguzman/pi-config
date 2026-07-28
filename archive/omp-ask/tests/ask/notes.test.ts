@@ -1,5 +1,5 @@
 import { createAskTool } from "../../extensions/ask.ts";
-import { K, check, driveDialog, report, test, type } from "../lib/harness.ts";
+import { K, check, driveDialog, report, test, type } from "../../../../tests/lib/harness.ts";
 
 const askTool: any = createAskTool();
 

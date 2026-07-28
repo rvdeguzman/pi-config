@@ -4,7 +4,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-"$here/../lib/link-pi-modules.sh"
+"$here/../../../../tests/lib/link-pi-modules.sh"
 echo
 
 failed=0

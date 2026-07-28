@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createAskTool } from "../../extensions/ask.ts";
-import { K, check, driveDialog, report, screen, test, type, type DialogComponent } from "../lib/harness.ts";
+import { K, check, driveDialog, report, screen, test, type, type DialogComponent } from "../../../../tests/lib/harness.ts";
 
 const askTool: any = createAskTool();
 
