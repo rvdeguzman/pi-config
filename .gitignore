@@ -1,1 +1,15 @@
+# This repo is checked out directly at ~/.pi/agent. Whitelist the authored
+# config; everything else there is machine state (auth, sessions, caches).
+/*
+!/.gitignore
+!/AGENTS.md
+!/settings.json
+!/models.json
+!/web-search.json
+!/update-skills
+!/skills
+!/extensions
+!/agents
+!/tools
 node_modules/
+agents/.glla-subagent-sync.json
