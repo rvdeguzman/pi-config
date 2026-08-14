@@ -10,6 +10,6 @@
 !/skills
 !/extensions
 !/agents
-!/tools
+!/scripts
 node_modules/
 agents/.glla-subagent-sync.json

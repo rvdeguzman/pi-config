@@ -8,11 +8,11 @@ dependency-free and fast to load. These scripts are how that art is produced and
 inspected. Plain `.mjs`, no build step, no dependencies:
 
 ```sh
-node pi/tools/logo/brand-render.mjs           # sample sizes of the Brand
-node pi/tools/logo/brand-render.mjs 40 0.07   # <cols> <strokeWidth>
-node pi/tools/logo/logo-preview.mjs           # every /logo entry, gruvbox gradient
-node pi/tools/logo/header-preview.mjs         # full header layout at 4 widths (fetches a live quote)
-node pi/tools/logo/color-modes.mjs            # truecolor vs ANSI vs plain, in situ
+node pi/scripts/logo/brand-render.mjs           # sample sizes of the Brand
+node pi/scripts/logo/brand-render.mjs 40 0.07   # <cols> <strokeWidth>
+node pi/scripts/logo/logo-preview.mjs           # every /logo entry, gruvbox gradient
+node pi/scripts/logo/header-preview.mjs         # full header layout at 4 widths (fetches a live quote)
+node pi/scripts/logo/color-modes.mjs            # truecolor vs ANSI vs plain, in situ
 ```
 
 They live outside `pi/extensions/` on purpose: pi auto-discovers
