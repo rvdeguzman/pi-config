@@ -1,6 +1,6 @@
 /**
  * Provider quota status — pings Claude and Codex usage endpoints (same ones
- * notch-usage uses) and shows e.g. "cl 5h 8% · wk 19% │ cx wk 9%" in the footer.
+ * notch-usage uses) and shows e.g. "cc 5h 8% · wk 19% │ cx wk 9%" in the footer.
  * Reads OAuth tokens pi already stores in ~/.pi/agent/auth.json.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,7 +11,7 @@ import { join } from "node:path";
 const REFRESH_MS = 5 * 60 * 1000;
 // File cache shared across pi instances so N open sessions don't each ping.
 const CACHE_PATH = join(homedir(), ".pi/agent/quota-cache.json");
-const TTL: Record<string, number> = { cl: 15 * 60 * 1000, cx: 5 * 60 * 1000 };
+const TTL: Record<string, number> = { cc: 15 * 60 * 1000, cx: 5 * 60 * 1000 };
 
 type Win = { label: string; pct: number };
 type Cache = Record<string, { at: number; wins: Win[]; backoffUntil?: number }>;
@@ -115,7 +115,7 @@ export default function (pi: ExtensionAPI) {
 		const provider = ctx.model?.provider;
 		const source =
 			provider === "anthropic"
-				? { tag: "cl", fetch: () => cached("cl", claudeWindows) }
+				? { tag: "cc", fetch: () => cached("cc", claudeWindows) }
 				: provider === "openai-codex"
 					? { tag: "cx", fetch: () => cached("cx", codexWindows) }
 					: undefined;
