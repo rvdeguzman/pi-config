@@ -4,9 +4,9 @@
   "defaultModel": "claude-fable-5",
   "packages": [
     "npm:pi-claude-auth",
+    "npm:pi-web-search",
     "npm:@juicesharp/rpiv-ask-user-question",
     "git:github.com/DietrichGebert/ponytail",
-    "npm:pi-web-search",
     "npm:@injaneity/pi-computer-use",
     "npm:pi-exa"
   ],
