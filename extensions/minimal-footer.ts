@@ -61,7 +61,7 @@ export function formatFooter(
 	const tokens = `${formatTokens(context?.tokens)}/${formatTokens(context?.contextWindow ?? model?.contextWindow)}`;
 	const percent = context?.percent == null ? "?" : `${context.percent.toFixed(1)}%`;
 	const fast = model?.provider === "openai-codex" && priorityEnabled ? "⚡" : "";
-	const thinking = model?.reasoning ? ` • ${ctx.thinkingLevel ?? "off"}` : "";
+	const thinking = model?.reasoning ? ` ${ctx.thinkingLevel ?? "off"}` : "";
 	const left = `${cache} ${tokens} ${percent}`;
 	const right = `${fast}${model?.id ?? "no-model"}${thinking}`;
 	const shownQuota = truncateToWidth(quota, width, "");

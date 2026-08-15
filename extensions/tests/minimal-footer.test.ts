@@ -25,7 +25,7 @@ test("renders the footer without cost", () => {
 	};
 
 	const left = "ch98.3% 85k/272k 31.2%";
-	const right = "⚡gpt-5.6-sol • xhigh";
+	const right = "⚡gpt-5.6-sol xhigh";
 
 	assert.deepEqual(formatFooter(ctx as never, 100, true, "", "master"), [
 		`~/.pi/agent${formatGitSuffix(ctx.cwd, "master")}`,

@@ -1,6 +1,6 @@
 /**
  * Provider quota status — pings Claude and Codex usage endpoints (same ones
- * notch-usage uses) and shows e.g. "cc 5h 8% · wk 19% │ cx wk 9%" in the footer.
+ * notch-usage uses) and shows e.g. "cc 5h 8% wk 19% │ cx wk 9%" in the footer.
  * Reads OAuth tokens pi already stores in ~/.pi/agent/auth.json.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -126,10 +126,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		const wins = await source.fetch().catch(() => [] as Win[]);
 		if (wins.length === 0) return; // offline/no auth: keep last shown
-		const text = wins.map((w) => `${theme.fg("dim", w.label)} ${pct(w.pct)}`).join(theme.fg("dim", " · "));
+		const text = wins.map((w) => `${theme.fg("dim", w.label)} ${pct(w.pct)}`).join(" ");
 		ctx.ui.setStatus("quota", `${theme.fg("dim", source.tag)} ${text}`);
 		// Plain text for custom footers (e.g. minimal-footer) that replace the built-in one.
-		const plain = wins.map((w) => `${w.label} ${Math.round(w.pct)}%`).join(" · ");
+		const plain = wins.map((w) => `${w.label} ${Math.round(w.pct)}%`).join(" ");
 		pi.events.emit("quota:changed", `${source.tag} ${plain}`);
 	}
 
