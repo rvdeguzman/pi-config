@@ -13,8 +13,28 @@ const REFRESH_MS = 5 * 60 * 1000;
 const CACHE_PATH = join(homedir(), ".pi/agent/quota-cache.json");
 const TTL: Record<string, number> = { cc: 15 * 60 * 1000, cx: 5 * 60 * 1000 };
 
-type Win = { label: string; pct: number };
+export type Win = { label: string; pct: number; resetAt?: number };
 type Cache = Record<string, { at: number; wins: Win[]; backoffUntil?: number }>;
+
+export function formatReset(resetAt: number | undefined, now = Date.now()): string {
+	if (resetAt == null || !Number.isFinite(resetAt)) return "";
+	const minutes = Math.max(0, Math.ceil((resetAt - now) / 60_000));
+	const days = Math.floor(minutes / 1_440);
+	const hours = Math.floor((minutes % 1_440) / 60);
+	const mins = minutes % 60;
+	if (days) return `${days}d${hours ? ` ${hours}h` : ""}`;
+	if (hours) return `${hours}h${mins ? ` ${mins}m` : ""}`;
+	return `${mins}m`;
+}
+
+export function formatQuota(wins: readonly Win[], now = Date.now()): string {
+	return wins
+		.map((w) => {
+			const reset = formatReset(w.resetAt, now);
+			return `${w.label} ${Math.round(w.pct)}%${reset ? ` ${reset}` : ""}`;
+		})
+		.join(" ");
+}
 
 function loadCache(): Cache {
 	try {
@@ -72,8 +92,18 @@ async function claudeWindows(): Promise<Win[]> {
 	});
 	if (!u) return [];
 	const wins: Win[] = [];
-	if (u.five_hour) wins.push({ label: "5h", pct: u.five_hour.utilization ?? 0 });
-	if (u.seven_day) wins.push({ label: "wk", pct: u.seven_day.utilization ?? 0 });
+	if (u.five_hour)
+		wins.push({
+			label: "5h",
+			pct: u.five_hour.utilization ?? 0,
+			resetAt: u.five_hour.resets_at ? Date.parse(u.five_hour.resets_at) : undefined,
+		});
+	if (u.seven_day)
+		wins.push({
+			label: "wk",
+			pct: u.seven_day.utilization ?? 0,
+			resetAt: u.seven_day.resets_at ? Date.parse(u.seven_day.resets_at) : undefined,
+		});
 	return wins;
 }
 
@@ -94,23 +124,47 @@ async function codexWindows(): Promise<Win[]> {
 	});
 	const wins: Win[] = [];
 	for (const w of [u?.rate_limit?.primary_window, u?.rate_limit?.secondary_window]) {
-		if (w) wins.push({ label: codexLabel(w.limit_window_seconds), pct: w.used_percent ?? 0 });
+		if (!w) continue;
+		const resetAt =
+			typeof w.reset_at === "number"
+				? w.reset_at * 1000
+				: typeof w.reset_after_seconds === "number"
+					? Date.now() + w.reset_after_seconds * 1000
+					: undefined;
+		wins.push({ label: codexLabel(w.limit_window_seconds), pct: w.used_percent ?? 0, resetAt });
 	}
 	return wins;
 }
 
 export default function (pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
+	let countdownTimer: ReturnType<typeof setInterval> | undefined;
 	let lastFetch = 0;
+	let lastWins: Win[] = [];
 
-	async function refresh(ctx: ExtensionContext, force = false) {
-		if (!force && Date.now() - lastFetch < 60_000) return; // throttle turn_end pings
-		lastFetch = Date.now();
+	function renderQuota(ctx: ExtensionContext) {
+		if (lastWins.length === 0) return;
 		const theme = ctx.ui.theme;
 		const pct = (n: number) => {
 			const v = Math.round(n);
 			return theme.fg(v >= 90 ? "error" : v >= 70 ? "warning" : "success", `${v}%`);
 		};
+		ctx.ui.setStatus(
+			"quota",
+			lastWins
+				.map((w) => {
+					const reset = formatReset(w.resetAt);
+					return `${theme.fg("dim", w.label)} ${pct(w.pct)}${reset ? ` ${theme.fg("dim", reset)}` : ""}`;
+				})
+				.join(" "),
+		);
+		// Plain data for custom footers (e.g. minimal-footer) that replace the built-in one.
+		pi.events.emit("quota:changed", lastWins);
+	}
+
+	async function refresh(ctx: ExtensionContext, force = false) {
+		if (!force && Date.now() - lastFetch < 60_000) return; // throttle turn_end pings
+		lastFetch = Date.now();
 		// Only the active model's provider.
 		const provider = ctx.model?.provider;
 		const source =
@@ -120,21 +174,23 @@ export default function (pi: ExtensionAPI) {
 					? () => cached("cx", codexWindows)
 					: undefined;
 		if (!source) {
+			lastWins = [];
 			ctx.ui.setStatus("quota", undefined);
-			pi.events.emit("quota:changed", "");
+			pi.events.emit("quota:changed", []);
 			return;
 		}
 		const wins = await source().catch(() => [] as Win[]);
 		if (wins.length === 0) return; // offline/no auth: keep last shown
-		ctx.ui.setStatus("quota", wins.map((w) => `${theme.fg("dim", w.label)} ${pct(w.pct)}`).join(" "));
-		// Plain text for custom footers (e.g. minimal-footer) that replace the built-in one.
-		pi.events.emit("quota:changed", wins.map((w) => `${w.label} ${Math.round(w.pct)}%`).join(" "));
+		lastWins = wins;
+		renderQuota(ctx);
 	}
 
 	pi.on("session_start", async (_e, ctx) => {
 		void refresh(ctx, true);
 		clearInterval(timer);
+		clearInterval(countdownTimer);
 		timer = setInterval(() => void refresh(ctx, true), REFRESH_MS);
+		countdownTimer = setInterval(() => renderQuota(ctx), 60_000);
 	});
 
 	// Without this, a session_start timer outlives its ctx across newSession/fork/
@@ -142,7 +198,9 @@ export default function (pi: ExtensionAPI) {
 	// crashes pi when it next fires against the now-stale ctx.
 	pi.on("session_shutdown", () => {
 		clearInterval(timer);
+		clearInterval(countdownTimer);
 		timer = undefined;
+		countdownTimer = undefined;
 	});
 
 	pi.on("turn_end", async (_e, ctx) => void refresh(ctx));

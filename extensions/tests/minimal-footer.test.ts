@@ -4,6 +4,25 @@ import { join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import minimalFooter, { formatFooter, formatGitSuffix } from "../minimal-footer.ts";
+import { formatQuota, formatReset } from "../quota.ts";
+
+test("formats quota reset countdowns", () => {
+	const now = Date.UTC(2026, 0, 1);
+	assert.equal(formatReset(now + (5 * 24 + 2) * 60 * 60 * 1000, now), "5d 2h");
+	assert.equal(formatReset(now + (4 * 60 + 12) * 60 * 1000, now), "4h 12m");
+	assert.equal(formatReset(now + 59_000, now), "1m");
+	assert.equal(formatReset(now - 1, now), "0m");
+	assert.equal(
+		formatQuota(
+			[
+				{ label: "5h", pct: 100, resetAt: now + 5 * 60 * 60 * 1000 },
+				{ label: "wk", pct: 30 },
+			],
+			now,
+		),
+		"5h 100% 5h wk 30%",
+	);
+});
 
 test("renders the footer without cost", () => {
 	const usage = {

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { formatQuota, type Win } from "./quota.ts";
 
 const dirtyCache = new Map<string, { dirty: boolean; expires: number }>();
 
@@ -39,7 +40,7 @@ export function formatFooter(
 	ctx: ExtensionContext,
 	width: number,
 	priorityEnabled: boolean,
-	quota = "",
+	quota: string | readonly Win[] = "",
 	gitBranch: string | null = null,
 ) {
 	let cacheHitRate: number | undefined;
@@ -68,7 +69,8 @@ export function formatFooter(
 	const shownCwd = truncateToWidth(cwd, Math.max(0, width - visibleWidth(shownRight) - 2), "");
 	const topPadding = " ".repeat(Math.max(0, width - visibleWidth(shownCwd) - visibleWidth(shownRight)));
 	const shownLeft = truncateToWidth(left, width, "");
-	const shownQuota = truncateToWidth(quota, Math.max(0, width - visibleWidth(shownLeft) - (quota ? 2 : 0)), "");
+	const quotaText = typeof quota === "string" ? quota : formatQuota(quota);
+	const shownQuota = truncateToWidth(quotaText, Math.max(0, width - visibleWidth(shownLeft) - (quotaText ? 2 : 0)), "");
 	const padding = shownQuota ? " ".repeat(Math.max(0, width - visibleWidth(shownLeft) - visibleWidth(shownQuota))) : "";
 
 	return [shownCwd + topPadding + shownRight, shownLeft + padding + shownQuota];
@@ -76,16 +78,16 @@ export function formatFooter(
 
 export default function minimalFooter(pi: ExtensionAPI) {
 	let priorityEnabled = true;
-	let quota = "";
+	let quota: string | readonly Win[] = "";
 	let requestRender = () => {};
 	const unsubscribe = pi.events.on("openai-codex-priority:changed", (enabled) => {
 		if (typeof enabled !== "boolean") return;
 		priorityEnabled = enabled;
 		requestRender();
 	});
-	const unsubscribeQuota = pi.events.on("quota:changed", (text) => {
-		if (typeof text !== "string") return;
-		quota = text;
+	const unsubscribeQuota = pi.events.on("quota:changed", (value) => {
+		if (typeof value !== "string" && !Array.isArray(value)) return;
+		quota = value as string | readonly Win[];
 		requestRender();
 	});
 
