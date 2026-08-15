@@ -12,7 +12,7 @@
   "warnings": {
     "anthropicExtraUsage": false
   },
-  "defaultThinkingLevel": "low",
+  "defaultThinkingLevel": "high",
   "enabledModels": [
     "anthropic/claude-fable-5",
     "anthropic/claude-sonnet-5",
