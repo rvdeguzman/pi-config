@@ -107,8 +107,6 @@ export default function commitExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`Model returned an invalid Conventional Commit message:\n${commitMessage}`, "error");
 				return;
 			}
-			if (!(await ctx.ui.confirm("Commit these staged changes?", commitMessage))) return;
-
 			const committed = await pi.exec("git", ["commit", "-m", commitMessage], { cwd });
 			if (committed.code !== 0) {
 				ctx.ui.notify(committed.stderr.trim() || committed.stdout.trim() || "git commit failed", "error");
