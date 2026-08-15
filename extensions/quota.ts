@@ -17,8 +17,18 @@ const TTL: Record<string, number> = { cc: 15 * 60 * 1000, cx: 5 * 60 * 1000 };
 export type Win = { label: string; pct: number; resetAt?: number };
 type Cache = Record<string, { at: number; wins: Win[]; version?: number; backoffUntil?: number }>;
 
+/** Persisted toggle: /reset hides or shows the countdown next to each window. */
+const RESET_PATH = join(homedir(), ".pi/agent/quota-reset.json");
+let showReset = true;
+try {
+	showReset = (JSON.parse(readFileSync(RESET_PATH, "utf8")) as { show?: boolean }).show !== false;
+} catch {}
+export const setShowReset = (on: boolean) => {
+	showReset = on;
+};
+
 export function formatReset(resetAt: number | undefined, now = Date.now()): string {
-	if (resetAt == null || !Number.isFinite(resetAt)) return "";
+	if (!showReset || resetAt == null || !Number.isFinite(resetAt)) return "";
 	const minutes = Math.max(0, Math.ceil((resetAt - now) / 60_000));
 	const days = Math.floor(minutes / 1_440);
 	const hours = Math.floor((minutes % 1_440) / 60);
@@ -159,8 +169,9 @@ export default function (pi: ExtensionAPI) {
 				})
 				.join(" "),
 		);
-		// Plain data for custom footers (e.g. minimal-footer) that replace the built-in one.
-		pi.events.emit("quota:changed", lastWins);
+		// Pre-formatted text for custom footers (e.g. minimal-footer) that replace the built-in
+		// one: they may hold a separate module copy of showReset, so gate the countdown here.
+		pi.events.emit("quota:changed", formatQuota(lastWins));
 	}
 
 	async function refresh(ctx: ExtensionContext, force = false) {
@@ -177,7 +188,7 @@ export default function (pi: ExtensionAPI) {
 		if (!source) {
 			lastWins = [];
 			ctx.ui.setStatus("quota", undefined);
-			pi.events.emit("quota:changed", []);
+			pi.events.emit("quota:changed", "");
 			return;
 		}
 		const wins = await source().catch(() => [] as Win[]);
@@ -207,4 +218,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_end", async (_e, ctx) => void refresh(ctx));
 
 	pi.on("model_select", async (_e, ctx) => void refresh(ctx, true));
+
+	pi.registerCommand("reset", {
+		description: "Toggle quota reset countdown in the footer",
+		handler: async (_args, ctx) => {
+			setShowReset(!showReset);
+			try {
+				writeFileSync(RESET_PATH, `${JSON.stringify({ show: showReset })}\n`, "utf8");
+			} catch (error) {
+				ctx.ui.notify?.(`Could not save reset display: ${String(error)}`, "error");
+			}
+			renderQuota(ctx);
+			ctx.ui.notify?.(`Quota reset countdown ${showReset ? "ON" : "OFF"}`, "info");
+		},
+	});
 }

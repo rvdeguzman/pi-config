@@ -42,6 +42,7 @@ export function formatFooter(
 	priorityEnabled: boolean,
 	quota: string | readonly Win[] = "",
 	gitBranch: string | null = null,
+	perms = "",
 ) {
 	let cacheHitRate: number | undefined;
 
@@ -61,10 +62,11 @@ export function formatFooter(
 	const cache = cacheHitRate == null ? "ch?" : `ch${cacheHitRate.toFixed(1)}%`;
 	const tokens = `${formatTokens(context?.tokens)}/${formatTokens(context?.contextWindow ?? model?.contextWindow)}`;
 	const percent = context?.percent == null ? "?" : `${context.percent.toFixed(1)}%`;
-	const fast = model?.provider === "openai-codex" && priorityEnabled ? "⚡" : "";
+	const fast = model?.provider === "openai-codex" && priorityEnabled ? " fast" : "";
 	const thinking = model?.reasoning ? ` ${ctx.thinkingLevel ?? "off"}` : "";
-	const left = `${cache} ${tokens} ${percent}`;
-	const right = `${fast}${model?.id ?? "no-model"}${thinking}`;
+	const permsSuffix = perms ? ` ${perms}` : "";
+	const left = `${cache} ${tokens} ${percent}${permsSuffix}`;
+	const right = `${model?.id ?? "no-model"}${fast}${thinking}`;
 	const shownRight = truncateToWidth(right, width, "");
 	const shownCwd = truncateToWidth(cwd, Math.max(0, width - visibleWidth(shownRight) - 2), "");
 	const topPadding = " ".repeat(Math.max(0, width - visibleWidth(shownCwd) - visibleWidth(shownRight)));
@@ -79,6 +81,7 @@ export function formatFooter(
 export default function minimalFooter(pi: ExtensionAPI) {
 	let priorityEnabled = true;
 	let quota: string | readonly Win[] = "";
+	let perms = "";
 	let requestRender = () => {};
 	const unsubscribe = pi.events.on("openai-codex-priority:changed", (enabled) => {
 		if (typeof enabled !== "boolean") return;
@@ -88,6 +91,11 @@ export default function minimalFooter(pi: ExtensionAPI) {
 	const unsubscribeQuota = pi.events.on("quota:changed", (value) => {
 		if (typeof value !== "string" && !Array.isArray(value)) return;
 		quota = value as string | readonly Win[];
+		requestRender();
+	});
+	const unsubscribePerms = pi.events.on("readonly:changed", (value) => {
+		if (typeof value !== "string") return;
+		perms = value;
 		requestRender();
 	});
 
@@ -105,7 +113,7 @@ export default function minimalFooter(pi: ExtensionAPI) {
 				},
 				invalidate() {},
 				render: (width) =>
-					formatFooter(ctx, width, priorityEnabled, quota, footerData?.getGitBranch() ?? null).map((line) =>
+					formatFooter(ctx, width, priorityEnabled, quota, footerData?.getGitBranch() ?? null, perms).map((line) =>
 						theme.fg("dim", line),
 					),
 			};
@@ -115,5 +123,6 @@ export default function minimalFooter(pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		unsubscribe();
 		unsubscribeQuota();
+		unsubscribePerms();
 	});
 }
