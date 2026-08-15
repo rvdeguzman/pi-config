@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import minimalFooter, { formatFooter } from "../minimal-footer.ts";
+import minimalFooter, { formatFooter, formatGitSuffix } from "../minimal-footer.ts";
 
 test("renders the footer without cost", () => {
 	const usage = {
@@ -24,13 +24,29 @@ test("renders the footer without cost", () => {
 		getContextUsage: () => ({ tokens: 84_864, contextWindow: 272_000, percent: 31.2 }),
 	};
 
-	const left = "CH98.3% (sub) 85k/272k 31.2%";
+	const left = "ch98.3% 85k/272k 31.2%";
 	const right = "⚡gpt-5.6-sol • xhigh";
 
-	assert.deepEqual(formatFooter(ctx as never, 100, true), [
-		"~/.pi/agent",
+	assert.deepEqual(formatFooter(ctx as never, 100, true, "", "master"), [
+		`~/.pi/agent${formatGitSuffix(ctx.cwd, "master")}`,
 		left + " ".repeat(100 - visibleWidth(left) - visibleWidth(right)) + right,
 	]);
+});
+
+test("shows provider usage above the model name", () => {
+	const ctx = {
+		cwd: homedir(),
+		model: { id: "gpt-5.6-sol", provider: "openai-codex", reasoning: false, contextWindow: 272_000 },
+		modelRegistry: { isUsingOAuth: () => true },
+		sessionManager: { getEntries: () => [] },
+		getContextUsage: () => undefined,
+	};
+	const quota = "cx 5h 12% · wk 19%";
+	const [top, stats] = formatFooter(ctx as never, 100, true, quota);
+
+	assert.ok(top.endsWith(quota));
+	assert.match(stats, /⚡gpt-5\.6-sol$/);
+	assert.doesNotMatch(stats, /cx 5h/);
 });
 
 test("redraws when fast mode changes", () => {
