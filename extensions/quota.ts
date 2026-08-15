@@ -11,10 +11,11 @@ import { join } from "node:path";
 const REFRESH_MS = 5 * 60 * 1000;
 // File cache shared across pi instances so N open sessions don't each ping.
 const CACHE_PATH = join(homedir(), ".pi/agent/quota-cache.json");
+const CACHE_VERSION = 2;
 const TTL: Record<string, number> = { cc: 15 * 60 * 1000, cx: 5 * 60 * 1000 };
 
 export type Win = { label: string; pct: number; resetAt?: number };
-type Cache = Record<string, { at: number; wins: Win[]; backoffUntil?: number }>;
+type Cache = Record<string, { at: number; wins: Win[]; version?: number; backoffUntil?: number }>;
 
 export function formatReset(resetAt: number | undefined, now = Date.now()): string {
 	if (resetAt == null || !Number.isFinite(resetAt)) return "";
@@ -49,10 +50,10 @@ async function cached(key: string, fetcher: () => Promise<Win[]>): Promise<Win[]
 	const cache = loadCache();
 	const e = cache[key];
 	const now = Date.now();
-	if (e && (now - e.at < TTL[key] || (e.backoffUntil ?? 0) > now)) return e.wins;
+	if (e && ((e.version === CACHE_VERSION && now - e.at < TTL[key]) || (e.backoffUntil ?? 0) > now)) return e.wins;
 	try {
 		const wins = await fetcher();
-		if (wins.length) cache[key] = { at: now, wins };
+		if (wins.length) cache[key] = { at: now, wins, version: CACHE_VERSION };
 		else if (e) return e.wins; // fetch failed/empty: keep stale
 		writeFileSync(CACHE_PATH, JSON.stringify(cache));
 		return wins;
