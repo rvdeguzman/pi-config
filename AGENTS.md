@@ -11,6 +11,12 @@ When cloning repositories for reference or investigation, place them in a `.repo
 - Do not build or run exploratory repositories unless explicitly requested.
 - Follow project-specific instructions when they define another location.
 
+## Running things
+
+Use `make <target>` for common tasks (test, lint, build, run) when a project has or needs one. Add a Makefile target instead of documenting ad-hoc shell one-liners.
+
+- Makefile is the default: it's preinstalled everywhere, no new dependency.
+
 ## Grilling before building
 
 - Before implementing any non-trivial build or design change (new feature, redesign, architecture decision), apply the `grilling` skill first: interview me until the design tree is settled. Skip grilling for quick fixes, questions, investigations, and one-liner tasks.
