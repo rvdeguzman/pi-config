@@ -139,6 +139,14 @@ export default function (pi: ExtensionAPI) {
 		timer = setInterval(() => void refresh(ctx, true), REFRESH_MS);
 	});
 
+	// Without this, a session_start timer outlives its ctx across newSession/fork/
+	// switchSession/reload (a fresh extension instance owns the next session) and
+	// crashes pi when it next fires against the now-stale ctx.
+	pi.on("session_shutdown", () => {
+		clearInterval(timer);
+		timer = undefined;
+	});
+
 	pi.on("turn_end", async (_e, ctx) => void refresh(ctx));
 
 	pi.on("model_select", async (_e, ctx) => void refresh(ctx, true));
