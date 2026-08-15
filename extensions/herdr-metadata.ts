@@ -2,8 +2,8 @@
  * herdr-metadata: publishes display-only pane metadata to herdr.
  *
  * Companion to the managed herdr-agent-state.ts (semantic state) — this one
- * uses pane.report_metadata for presentation: pane title = current task
- * (first line of the latest user prompt), and tokens {model, cost, ctx}
+ * uses pane.report_metadata for presentation: pane title = "pi",
+ * and tokens {model, cost, ctx}
  * renderable as $model/$cost/$ctx in Agent sidebar rows.
  */
 
@@ -35,25 +35,6 @@ function send(params: Record<string, unknown>) {
 	});
 }
 
-function latestUserPrompt(ctx: ExtensionContext): string | undefined {
-	const branch = ctx.sessionManager.getBranch();
-	for (let i = branch.length - 1; i >= 0; i -= 1) {
-		const entry = branch[i]!;
-		if (entry.type !== "message" || entry.message.role !== "user") continue;
-		const content = entry.message.content;
-		const text =
-			typeof content === "string"
-				? content
-				: content
-						.filter((b: any) => b.type === "text")
-						.map((b: any) => b.text)
-						.join(" ");
-		const line = text.trim().split("\n")[0];
-		if (line) return line.length > 60 ? `${line.slice(0, 57)}...` : line;
-	}
-	return undefined;
-}
-
 function usageTokens(ctx: ExtensionContext): Record<string, string> {
 	let cost = 0;
 	for (const entry of ctx.sessionManager.getEntries()) {
@@ -77,8 +58,7 @@ export default function herdrMetadata(pi: ExtensionAPI) {
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		const title = latestUserPrompt(ctx);
-		send(title ? { title, tokens: usageTokens(ctx) } : { tokens: usageTokens(ctx) });
+		send({ title: "pi", tokens: usageTokens(ctx) });
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
