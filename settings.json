@@ -1,7 +1,5 @@
 {
   "lastChangelogVersion": "0.84.2",
-  "defaultProvider": "anthropic",
-  "defaultModel": "claude-fable-5",
   "packages": [
     "npm:pi-claude-auth",
     "npm:pi-web-search",
