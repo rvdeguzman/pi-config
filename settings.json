@@ -8,8 +8,7 @@
     "git:github.com/DietrichGebert/ponytail",
     "npm:pi-web-search",
     "npm:@injaneity/pi-computer-use",
-    "npm:pi-exa",
-    "npm:@zaganjade/pi-usage"
+    "npm:pi-exa"
   ],
   "quietStartup": true,
   "warnings": {
