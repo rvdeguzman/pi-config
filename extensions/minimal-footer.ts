@@ -64,14 +64,14 @@ export function formatFooter(
 	const thinking = model?.reasoning ? ` ${ctx.thinkingLevel ?? "off"}` : "";
 	const left = `${cache} ${tokens} ${percent}`;
 	const right = `${fast}${model?.id ?? "no-model"}${thinking}`;
-	const shownQuota = truncateToWidth(quota, width, "");
-	const shownCwd = truncateToWidth(cwd, Math.max(0, width - visibleWidth(shownQuota) - (shownQuota ? 2 : 0)), "");
-	const topPadding = shownQuota ? " ".repeat(Math.max(0, width - visibleWidth(shownCwd) - visibleWidth(shownQuota))) : "";
+	const shownRight = truncateToWidth(right, width, "");
+	const shownCwd = truncateToWidth(cwd, Math.max(0, width - visibleWidth(shownRight) - 2), "");
+	const topPadding = " ".repeat(Math.max(0, width - visibleWidth(shownCwd) - visibleWidth(shownRight)));
 	const shownLeft = truncateToWidth(left, width, "");
-	const shownRight = truncateToWidth(right, Math.max(0, width - visibleWidth(shownLeft) - 2), "");
-	const padding = " ".repeat(Math.max(0, width - visibleWidth(shownLeft) - visibleWidth(shownRight)));
+	const shownQuota = truncateToWidth(quota, Math.max(0, width - visibleWidth(shownLeft) - (quota ? 2 : 0)), "");
+	const padding = shownQuota ? " ".repeat(Math.max(0, width - visibleWidth(shownLeft) - visibleWidth(shownQuota))) : "";
 
-	return [shownCwd + topPadding + shownQuota, shownLeft + padding + shownRight];
+	return [shownCwd + topPadding + shownRight, shownLeft + padding + shownQuota];
 }
 
 export default function minimalFooter(pi: ExtensionAPI) {

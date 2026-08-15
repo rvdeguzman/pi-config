@@ -1,6 +1,6 @@
 /**
  * Provider quota status — pings Claude and Codex usage endpoints (same ones
- * notch-usage uses) and shows e.g. "cc 5h 8% wk 19% │ cx wk 9%" in the footer.
+ * notch-usage uses) and shows e.g. "5h 8% wk 19%" in the footer.
  * Reads OAuth tokens pi already stores in ~/.pi/agent/auth.json.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -115,22 +115,20 @@ export default function (pi: ExtensionAPI) {
 		const provider = ctx.model?.provider;
 		const source =
 			provider === "anthropic"
-				? { tag: "cc", fetch: () => cached("cc", claudeWindows) }
+				? () => cached("cc", claudeWindows)
 				: provider === "openai-codex"
-					? { tag: "cx", fetch: () => cached("cx", codexWindows) }
+					? () => cached("cx", codexWindows)
 					: undefined;
 		if (!source) {
 			ctx.ui.setStatus("quota", undefined);
 			pi.events.emit("quota:changed", "");
 			return;
 		}
-		const wins = await source.fetch().catch(() => [] as Win[]);
+		const wins = await source().catch(() => [] as Win[]);
 		if (wins.length === 0) return; // offline/no auth: keep last shown
-		const text = wins.map((w) => `${theme.fg("dim", w.label)} ${pct(w.pct)}`).join(" ");
-		ctx.ui.setStatus("quota", `${theme.fg("dim", source.tag)} ${text}`);
+		ctx.ui.setStatus("quota", wins.map((w) => `${theme.fg("dim", w.label)} ${pct(w.pct)}`).join(" "));
 		// Plain text for custom footers (e.g. minimal-footer) that replace the built-in one.
-		const plain = wins.map((w) => `${w.label} ${Math.round(w.pct)}%`).join(" ");
-		pi.events.emit("quota:changed", `${source.tag} ${plain}`);
+		pi.events.emit("quota:changed", wins.map((w) => `${w.label} ${Math.round(w.pct)}%`).join(" "));
 	}
 
 	pi.on("session_start", async (_e, ctx) => {

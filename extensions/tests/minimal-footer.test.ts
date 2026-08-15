@@ -26,14 +26,15 @@ test("renders the footer without cost", () => {
 
 	const left = "ch98.3% 85k/272k 31.2%";
 	const right = "⚡gpt-5.6-sol xhigh";
+	const top = `~/.pi/agent${formatGitSuffix(ctx.cwd, "master")}`;
 
 	assert.deepEqual(formatFooter(ctx as never, 100, true, "", "master"), [
-		`~/.pi/agent${formatGitSuffix(ctx.cwd, "master")}`,
-		left + " ".repeat(100 - visibleWidth(left) - visibleWidth(right)) + right,
+		top + " ".repeat(100 - visibleWidth(top) - visibleWidth(right)) + right,
+		left,
 	]);
 });
 
-test("shows provider usage above the model name", () => {
+test("shows model on top and provider usage below", () => {
 	const ctx = {
 		cwd: homedir(),
 		model: { id: "gpt-5.6-sol", provider: "openai-codex", reasoning: false, contextWindow: 272_000 },
@@ -41,12 +42,12 @@ test("shows provider usage above the model name", () => {
 		sessionManager: { getEntries: () => [] },
 		getContextUsage: () => undefined,
 	};
-	const quota = "cx 5h 12% · wk 19%";
+	const quota = "5h 12% wk 19%";
 	const [top, stats] = formatFooter(ctx as never, 100, true, quota);
 
-	assert.ok(top.endsWith(quota));
-	assert.match(stats, /⚡gpt-5\.6-sol$/);
-	assert.doesNotMatch(stats, /cx 5h/);
+	assert.ok(stats.endsWith(quota));
+	assert.match(top, /⚡gpt-5\.6-sol$/);
+	assert.doesNotMatch(top, /5h 12%/);
 });
 
 test("redraws when fast mode changes", () => {
@@ -73,7 +74,7 @@ test("redraws when fast mode changes", () => {
 	const footer = footerFactory?.({ requestRender: () => renders++ }, { fg: (_color: string, text: string) => text });
 	priorityListener(true);
 	assert.equal(renders, 1);
-	listeners.get("quota:changed")?.("cl 5h 12% · wk 19%");
+	listeners.get("quota:changed")?.("5h 12% wk 19%");
 	assert.equal(renders, 2);
 	footer?.dispose();
 });
@@ -88,11 +89,11 @@ test("shows lightning only when OpenAI Codex fast mode is on", () => {
 	};
 
 	const fastFooter = formatFooter(ctx as never, 106, true);
-	assert.match(fastFooter[1], /⚡gpt-5\.6-sol$/);
+	assert.match(fastFooter[0], /⚡gpt-5\.6-sol$/);
 	assert.ok(fastFooter.every((line) => visibleWidth(line) <= 106));
-	assert.match(formatFooter(ctx as never, 100, false)[1], /gpt-5\.6-sol$/);
+	assert.match(formatFooter(ctx as never, 100, false)[0], /gpt-5\.6-sol$/);
 	assert.doesNotMatch(
-		formatFooter({ ...ctx, model: { ...ctx.model, provider: "anthropic" } } as never, 100, true)[1],
+		formatFooter({ ...ctx, model: { ...ctx.model, provider: "anthropic" } } as never, 100, true)[0],
 		/⚡/,
 	);
 });
