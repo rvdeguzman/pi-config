@@ -17,6 +17,10 @@ Use `make <target>` for common tasks (test, lint, build, run) when a project has
 
 - Makefile is the default: it's preinstalled everywhere, no new dependency.
 
+## Task tracking
+
+For multi-step work, track steps with the `todo` tool (add/toggle/list/clear) instead of only holding the plan in context. Keep it current as steps complete so `/todos` reflects real state.
+
 ## Grilling before building
 
 - Before implementing any non-trivial build or design change (new feature, redesign, architecture decision), apply the `grilling` skill first: interview me until the design tree is settled. Skip grilling for quick fixes, questions, investigations, and one-liner tasks.
