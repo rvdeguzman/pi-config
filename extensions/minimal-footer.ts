@@ -42,7 +42,6 @@ export function formatFooter(
 	priorityEnabled: boolean,
 	quota: string | readonly Win[] = "",
 	gitBranch: string | null = null,
-	perms = "",
 ) {
 	let cacheHitRate: number | undefined;
 
@@ -64,8 +63,7 @@ export function formatFooter(
 	const percent = context?.percent == null ? "?" : `${context.percent.toFixed(1)}%`;
 	const fast = model?.provider === "openai-codex" && priorityEnabled ? " fast" : "";
 	const thinking = model?.reasoning ? ` ${ctx.thinkingLevel ?? "off"}` : "";
-	const permsSuffix = perms ? ` ${perms}` : "";
-	const left = `${cache} ${tokens} ${percent}${permsSuffix}`;
+	const left = `${cache} ${tokens} ${percent}`;
 	const right = `${model?.id ?? "no-model"}${fast}${thinking}`;
 	const shownRight = truncateToWidth(right, width, "");
 	const shownCwd = truncateToWidth(cwd, Math.max(0, width - visibleWidth(shownRight) - 2), "");
@@ -81,7 +79,6 @@ export function formatFooter(
 export default function minimalFooter(pi: ExtensionAPI) {
 	let priorityEnabled = true;
 	let quota: string | readonly Win[] = "";
-	let perms = "";
 	let requestRender = () => {};
 	const unsubscribe = pi.events.on("openai-codex-priority:changed", (enabled) => {
 		if (typeof enabled !== "boolean") return;
@@ -93,12 +90,6 @@ export default function minimalFooter(pi: ExtensionAPI) {
 		quota = value as string | readonly Win[];
 		requestRender();
 	});
-	const unsubscribePerms = pi.events.on("readonly:changed", (value) => {
-		if (typeof value !== "string") return;
-		perms = value;
-		requestRender();
-	});
-
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setFooter((tui, theme, footerData) => {
@@ -113,7 +104,7 @@ export default function minimalFooter(pi: ExtensionAPI) {
 				},
 				invalidate() {},
 				render: (width) =>
-					formatFooter(ctx, width, priorityEnabled, quota, footerData?.getGitBranch() ?? null, perms).map((line) =>
+					formatFooter(ctx, width, priorityEnabled, quota, footerData?.getGitBranch() ?? null).map((line) =>
 						theme.fg("dim", line),
 					),
 			};
@@ -123,6 +114,5 @@ export default function minimalFooter(pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		unsubscribe();
 		unsubscribeQuota();
-		unsubscribePerms();
 	});
 }
