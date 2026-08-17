@@ -14,7 +14,7 @@
   "warnings": {
     "anthropicExtraUsage": false
   },
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "high",
   "enabledModels": [
     "anthropic/claude-fable-5",
     "anthropic/claude-sonnet-5",
@@ -24,5 +24,5 @@
     "anthropic/claude-opus-5"
   ],
   "hideThinkingBlock": true,
-  "theme": "dark",
+  "theme": "dark"
 }
