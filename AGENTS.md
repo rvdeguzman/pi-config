@@ -26,3 +26,9 @@ For multi-step work, track steps with the `todo` tool (add/toggle/list/clear) in
 - Before implementing any non-trivial build or design change (new feature, redesign, architecture decision), apply the `grilling` skill first: interview me until the design tree is settled. Skip grilling for quick fixes, questions, investigations, and one-liner tasks.
 - When grilling, deliver each round's frontier questions through the ask tool in a single call — numbered questions, your recommended answer listed as the first option.
 - Never implement during a grilling session until I confirm shared understanding.
+- After I confirm shared understanding, do not edit files yet. Present one four-option implementation gate:
+  1. **Delegate** — launch a tracked `worker` subagent with the approved plan.
+  2. **Handoff** — prepare a fresh-session prompt using the installed `/handoff` flow.
+  3. **Save plan** — write the approved plan to the project's existing plans/docs directory (ask for a path if none exists), register it as a mission `note` artifact when a mission exists, then present this gate again.
+  4. **Continue design** — ask whether to refine the plan or re-run grilling; make no implementation edits.
+- Begin implementation only after I explicitly choose **Delegate**. A plan document is not implementation approval.
