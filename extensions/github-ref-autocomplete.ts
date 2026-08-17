@@ -26,7 +26,7 @@ function provider(current: AutocompleteProvider): AutocompleteProvider {
 			return Promise.resolve({
 				prefix: ref.prefix,
 				items: kinds.map((kind) => ({
-					value: `${kind}://${ref.number}`,
+					value: `${kind}://${ref.number} `,
 					label: `${kind === "pr" ? "PR" : "Issue"} #${ref.number}`,
 					description: `GitHub ${kind === "pr" ? "pull request" : "issue"}`,
 				})),
