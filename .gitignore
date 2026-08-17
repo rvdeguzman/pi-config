@@ -3,6 +3,8 @@
 /*
 !/.gitignore
 !/AGENTS.md
+!/SUBAGENT-SPEC.md
+!/SUBAGENT-SPEC.legacy.md
 !/settings.json
 !/models.json
 !/web-search.json
