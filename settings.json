@@ -6,7 +6,9 @@
     "npm:@juicesharp/rpiv-ask-user-question",
     "git:github.com/DietrichGebert/ponytail",
     "npm:@injaneity/pi-computer-use",
-    "npm:pi-exa"
+    "npm:pi-exa",
+    "npm:pi-intercom",
+    "npm:pi-subagents"
   ],
   "quietStartup": true,
   "warnings": {
