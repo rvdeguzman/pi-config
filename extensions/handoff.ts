@@ -12,9 +12,11 @@
  * The generated prompt appears as a draft in the editor for review/editing.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type Message, uuidv7 } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
@@ -77,7 +79,95 @@ function getHandoffMessages(branch: SessionEntry[]): AgentMessage[] {
 	return compactedBranch.map(entryToMessage).filter((message) => message !== undefined);
 }
 
+/** Shared by /handoff and /artifact: returns the generated prompt, or null if cancelled/failed. */
+async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Promise<string | null> {
+	// Gather conversation context from current branch. If the branch was compacted,
+	// include the compaction summary plus entries from firstKeptEntryId onward.
+	const messages = getHandoffMessages(ctx.sessionManager.getBranch());
+
+	if (messages.length === 0) {
+		ctx.ui.notify("No conversation to hand off", "error");
+		return null;
+	}
+
+	// Convert to LLM format and serialize
+	const conversationText = serializeConversation(convertToLlm(messages));
+
+	return await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+		const loader = new BorderedLoader(tui, theme, `Generating handoff prompt...`);
+		loader.onAbort = () => done(null);
+
+		const doGenerate = async () => {
+			const userMessage: Message = {
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: `## Conversation History\n\n${conversationText}\n\n## User's Goal for New Thread\n\n${goal}`,
+					},
+				],
+				timestamp: Date.now(),
+			};
+
+			const response = await ctx.modelRegistry.complete(
+				ctx.model!,
+				{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+				{
+					signal: loader.signal,
+					cacheRetention: "none",
+					sessionId: uuidv7(),
+				},
+			);
+
+			if (response.stopReason === "aborted") {
+				return null;
+			}
+
+			return response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("\n");
+		};
+
+		doGenerate()
+			.then(done)
+			.catch((err) => {
+				console.error("Handoff generation failed:", err);
+				done(null);
+			});
+
+		return loader;
+	});
+}
+
 export default function (pi: ExtensionAPI) {
+	pi.registerCommand("artifact", {
+		description: "Write the handoff context to .tmp/ as a markdown document",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("artifact requires interactive mode", "error");
+				return;
+			}
+			if (!ctx.model) {
+				ctx.ui.notify("No model selected", "error");
+				return;
+			}
+
+			const goal = args.trim() || "Snapshot the current context for later resumption. No specific next task yet.";
+			const result = await generateHandoff(ctx, goal);
+			if (result === null) {
+				ctx.ui.notify("Cancelled", "info");
+				return;
+			}
+
+			const dir = join(process.cwd(), ".tmp");
+			mkdirSync(dir, { recursive: true });
+			const file = join(dir, `handoff-${new Date().toISOString().replace(/[:.]/g, "-")}.md`);
+			writeFileSync(file, `${result}\n`);
+			ctx.ui.notify(`Wrote ${file}`, "info");
+		},
+	});
+
 	pi.registerCommand("handoff", {
 		description: "Transfer context to a new focused session",
 		handler: async (args, ctx) => {
@@ -97,66 +187,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Gather conversation context from current branch. If the branch was compacted,
-			// include the compaction summary plus entries from firstKeptEntryId onward.
-			const messages = getHandoffMessages(ctx.sessionManager.getBranch());
-
-			if (messages.length === 0) {
-				ctx.ui.notify("No conversation to hand off", "error");
-				return;
-			}
-
-			// Convert to LLM format and serialize
-			const llmMessages = convertToLlm(messages);
-			const conversationText = serializeConversation(llmMessages);
 			const currentSessionFile = ctx.sessionManager.getSessionFile();
-
-			// Generate the handoff prompt with loader UI
-			const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-				const loader = new BorderedLoader(tui, theme, `Generating handoff prompt...`);
-				loader.onAbort = () => done(null);
-
-				const doGenerate = async () => {
-					const userMessage: Message = {
-						role: "user",
-						content: [
-							{
-								type: "text",
-								text: `## Conversation History\n\n${conversationText}\n\n## User's Goal for New Thread\n\n${goal}`,
-							},
-						],
-						timestamp: Date.now(),
-					};
-
-					const response = await ctx.modelRegistry.complete(
-						ctx.model!,
-						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{
-							signal: loader.signal,
-							cacheRetention: "none",
-							sessionId: uuidv7(),
-						},
-					);
-
-					if (response.stopReason === "aborted") {
-						return null;
-					}
-
-					return response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n");
-				};
-
-				doGenerate()
-					.then(done)
-					.catch((err) => {
-						console.error("Handoff generation failed:", err);
-						done(null);
-					});
-
-				return loader;
-			});
+			const result = await generateHandoff(ctx, goal);
 
 			if (result === null) {
 				ctx.ui.notify("Cancelled", "info");
