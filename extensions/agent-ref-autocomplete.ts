@@ -27,7 +27,7 @@ function provider(current: AutocompleteProvider): AutocompleteProvider {
 			const typed = (match[1] ?? "").toLowerCase();
 			const items = agentNames()
 				.filter((n) => n.toLowerCase().startsWith(typed))
-				.map((n) => ({ value: n, label: `#${n}`, description: "subagent" }));
+				.map((n) => ({ value: `subagent://${n}`, label: `#${n}`, description: "subagent" }));
 			if (items.length === 0) return current.getSuggestions(lines, cursorLine, cursorCol, options);
 
 			return Promise.resolve({ prefix: `#${match[1] ?? ""}`, items });
