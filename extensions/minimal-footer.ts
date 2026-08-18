@@ -3,7 +3,24 @@ import { homedir } from "node:os";
 import { sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatQuota, type Win } from "./quota.ts";
+import { formatQuota, type QuotaPayload, type Win } from "./quota.ts";
+
+type QuotaValue = string | readonly Win[] | QuotaPayload;
+
+const isQuotaPayload = (v: unknown): v is QuotaPayload =>
+	typeof v === "object" && v !== null && Array.isArray((v as QuotaPayload).wins);
+
+/**
+ * Render the quota text. A {@link QuotaPayload} is formatted here, at render time, so
+ * the reset countdown ticks with the footer (every repaint, and at least every 2s)
+ * instead of needing a repaint timer inside quota.ts. `showReset` comes from the
+ * payload because this file may be a separate module copy with its own stale flag.
+ */
+function renderQuotaText(quota: QuotaValue): string {
+	if (typeof quota === "string") return quota;
+	if (isQuotaPayload(quota)) return formatQuota(quota.wins, Date.now(), quota.showReset);
+	return formatQuota(quota);
+}
 
 const dirtyCache = new Map<string, { dirty: boolean; expires: number }>();
 
@@ -40,7 +57,7 @@ export function formatFooter(
 	ctx: ExtensionContext,
 	width: number,
 	priorityEnabled: boolean,
-	quota: string | readonly Win[] = "",
+	quota: QuotaValue = "",
 	gitBranch: string | null = null,
 ) {
 	let cacheHitRate: number | undefined;
@@ -69,7 +86,7 @@ export function formatFooter(
 	const shownCwd = truncateToWidth(cwd, Math.max(0, width - visibleWidth(shownRight) - 2), "");
 	const topPadding = " ".repeat(Math.max(0, width - visibleWidth(shownCwd) - visibleWidth(shownRight)));
 	const shownLeft = truncateToWidth(left, width, "");
-	const quotaText = typeof quota === "string" ? quota : formatQuota(quota);
+	const quotaText = renderQuotaText(quota);
 	const shownQuota = truncateToWidth(quotaText, Math.max(0, width - visibleWidth(shownLeft) - (quotaText ? 2 : 0)), "");
 	const padding = shownQuota ? " ".repeat(Math.max(0, width - visibleWidth(shownLeft) - visibleWidth(shownQuota))) : "";
 
@@ -78,7 +95,7 @@ export function formatFooter(
 
 export default function minimalFooter(pi: ExtensionAPI) {
 	let priorityEnabled = true;
-	let quota: string | readonly Win[] = "";
+	let quota: QuotaValue = "";
 	let requestRender = () => {};
 	const unsubscribe = pi.events.on("openai-codex-priority:changed", (enabled) => {
 		if (typeof enabled !== "boolean") return;
@@ -86,8 +103,8 @@ export default function minimalFooter(pi: ExtensionAPI) {
 		requestRender();
 	});
 	const unsubscribeQuota = pi.events.on("quota:changed", (value) => {
-		if (typeof value !== "string" && !Array.isArray(value)) return;
-		quota = value as string | readonly Win[];
+		if (typeof value !== "string" && !Array.isArray(value) && !isQuotaPayload(value)) return;
+		quota = value as QuotaValue;
 		requestRender();
 	});
 	pi.on("session_start", (_event, ctx) => {

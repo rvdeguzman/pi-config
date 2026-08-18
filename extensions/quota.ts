@@ -15,6 +15,13 @@ const CACHE_VERSION = 2;
 const TTL: Record<string, number> = { cc: 15 * 60 * 1000, cx: 5 * 60 * 1000, k3: 5 * 60 * 1000 };
 
 export type Win = { label: string; pct: number; resetAt?: number };
+/**
+ * Payload for the `quota:changed` event. Carries the raw windows rather than
+ * pre-formatted text so a custom footer can recompute the reset countdown at render
+ * time, and rides `showReset` along because such a footer may hold a separate module
+ * copy of this file (and therefore a stale copy of the /reset toggle).
+ */
+export type QuotaPayload = { wins: readonly Win[]; showReset: boolean };
 type Cache = Record<string, { at: number; wins: Win[]; version?: number; backoffUntil?: number }>;
 
 /** Persisted toggle: /reset hides or shows the countdown next to each window. */
@@ -168,7 +175,6 @@ async function codexWindows(): Promise<Win[]> {
 
 export default function (pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
-	let countdownTimer: ReturnType<typeof setInterval> | undefined;
 	let lastFetch = 0;
 	let lastWins: Win[] = [];
 	// Bumped on every session_start/session_shutdown. An async refresh captures the
@@ -178,21 +184,19 @@ export default function (pi: ExtensionAPI) {
 
 	function stopTimers() {
 		clearInterval(timer);
-		clearInterval(countdownTimer);
 		timer = undefined;
-		countdownTimer = undefined;
 	}
 
 	/**
 	 * Touch `ctx` defensively and report whether it was still live.
 	 *
-	 * Clearing the timers in session_shutdown is necessary but not sufficient: it only
+	 * Clearing the timer in session_shutdown is necessary but not sufficient: it only
 	 * holds if pi delivers session_shutdown to the same closure that armed the timer
 	 * before invalidating that ctx. That contract has been observed to break (a stale
 	 * ctx reached renderQuota from a timer and killed pi). A throw inside a bare
 	 * setInterval callback is an uncaughtException that takes down the whole process,
 	 * which is absurd for a cosmetic footer widget, so every ctx access from a timer
-	 * goes through here and tears the timers down on the first stale hit.
+	 * goes through here and tears the timer down on the first stale hit.
 	 */
 	function withLiveCtx(fn: () => void): boolean {
 		try {
@@ -223,10 +227,12 @@ export default function (pi: ExtensionAPI) {
 					})
 					.join(" "),
 			);
-			// Pre-formatted text for custom footers (e.g. minimal-footer) that replace the built-in
-			// one: they may hold a separate module copy of showReset, so gate the countdown here.
+			// Raw windows for custom footers (e.g. minimal-footer) that replace the built-in one:
+			// they re-render on every repaint and at least every 2s, so they tick the countdown
+			// themselves. That is why this extension needs no repaint timer of its own; only the
+			// built-in setStatus string above is a snapshot, refreshed on the next fetch.
 			// Inside the guard because `pi` is invalidated alongside ctx.
-			pi.events.emit("quota:changed", formatQuota(lastWins));
+			pi.events.emit("quota:changed", { wins: lastWins, showReset } as QuotaPayload);
 		});
 	}
 
@@ -250,7 +256,7 @@ export default function (pi: ExtensionAPI) {
 			lastWins = [];
 			withLiveCtx(() => {
 				ctx.ui.setStatus("quota", undefined);
-				pi.events.emit("quota:changed", "");
+				pi.events.emit("quota:changed", { wins: [], showReset } as QuotaPayload);
 			});
 			return;
 		}
@@ -265,8 +271,10 @@ export default function (pi: ExtensionAPI) {
 		generation++;
 		stopTimers();
 		void refresh(ctx, true);
+		// Fetch only. It exists to catch a window rolling over (e.g. 5h resetting to 0%) while
+		// idle, which no turn_end would report. The countdown needs no timer: the footer
+		// recomputes it from resetAt on every repaint.
 		timer = setInterval(() => void refresh(ctx, true), REFRESH_MS);
-		countdownTimer = setInterval(() => renderQuota(ctx), 60_000);
 	});
 
 	// Without this, a session_start timer outlives its ctx across newSession/fork/
