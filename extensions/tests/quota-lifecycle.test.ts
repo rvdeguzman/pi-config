@@ -5,12 +5,15 @@
  *     at renderQuota (extensions/quota.ts)
  *     at Timeout._onTimeout (extensions/quota.ts)
  *
- * quota.ts arms two setInterval timers in session_start that close over that
- * session's ctx. Clearing them in session_shutdown is the primary cleanup, but it
- * only works if pi delivers session_shutdown to the same closure that armed the
- * timer before invalidating that ctx. When that didn't happen, the 60s countdown
- * tick touched a dead ctx and threw inside a bare timer callback — an
- * uncaughtException, which takes down the entire process.
+ * quota.ts arms a setInterval in session_start that closes over that session's ctx.
+ * Clearing it in session_shutdown is the primary cleanup, but it only works if pi
+ * delivers session_shutdown to the same closure that armed the timer before
+ * invalidating that ctx. When that didn't happen, the tick touched a dead ctx and
+ * threw inside a bare timer callback — an uncaughtException, which takes down the
+ * entire process.
+ *
+ * The 60s countdown repaint timer that originally crashed is gone: quota:changed now
+ * carries raw windows, so the footer recomputes the countdown at render time.
  *
  * Hermetic: HOME is redirected to a temp dir before importing quota.ts so the
  * module-level cache/auth paths never touch the real ~/.pi/agent files.
@@ -61,10 +64,11 @@ async function harness() {
 	})) as unknown as typeof globalThis.fetch;
 
 	const handlers = new Map<string, ((e: unknown, c: unknown) => unknown)[]>();
+	const emitted: unknown[] = [];
 	const pi = {
 		on: (evt: string, fn: (e: unknown, c: unknown) => unknown) =>
 			handlers.set(evt, [...(handlers.get(evt) ?? []), fn]),
-		events: { emit: () => {} },
+		events: { emit: (_evt: string, value: unknown) => void emitted.push(value) },
 		registerCommand: () => {},
 	};
 	(quota.default as (api: unknown) => void)(pi);
@@ -86,7 +90,9 @@ async function harness() {
 
 	return {
 		intervals,
-		countdown: () => [...intervals.values()].find((i) => i.ms === 60_000),
+		emitted,
+		// The sole remaining timer is the periodic fetch.
+		tick: () => [...intervals.values()][0],
 		setStale: (v: boolean) => {
 			stale = v;
 		},
@@ -94,6 +100,7 @@ async function harness() {
 			for (const h of handlers.get(evt) ?? []) await h({ type: evt }, ctx);
 			await new Promise((r) => realSetInterval.call(globalThis, r, 50));
 		},
+		settle: () => new Promise((r) => realSetInterval.call(globalThis, r, 50)),
 		restore: () => {
 			globalThis.setInterval = realSetInterval;
 			globalThis.clearInterval = realClearInterval;
@@ -102,17 +109,29 @@ async function harness() {
 	};
 }
 
-test("a timer tick on a stale ctx does not throw and tears its timers down", async () => {
+test("session_start arms exactly one timer, and it is the fetch timer", async () => {
 	const h = await harness();
 	try {
 		await h.fire("session_start");
-		assert.ok(h.countdown(), "session_start must arm the 60s countdown timer");
+		assert.equal(h.intervals.size, 1, "the 60s countdown repaint timer must be gone");
+		assert.ok((h.tick()?.ms ?? 0) >= 60_000, "the remaining timer is the periodic fetch, not a repaint");
+	} finally {
+		h.restore();
+	}
+});
+
+test("a timer tick on a stale ctx does not throw and tears its timer down", async () => {
+	const h = await harness();
+	try {
+		await h.fire("session_start");
+		assert.ok(h.tick());
 
 		// The crash condition: ctx is invalidated without session_shutdown reaching
-		// this closure, so the countdown interval is still live over a dead ctx.
+		// this closure, so the interval is still live over a dead ctx.
 		h.setStale(true);
-		assert.doesNotThrow(() => h.countdown()?.fn(), "stale tick must not escape into the timer callback");
-		assert.equal(h.intervals.size, 0, "first stale touch must clear both timers");
+		assert.doesNotThrow(() => h.tick()?.fn(), "stale tick must not escape into the timer callback");
+		await h.settle();
+		assert.equal(h.intervals.size, 0, "first stale touch must clear the timer");
 	} finally {
 		h.restore();
 	}
@@ -123,13 +142,14 @@ test("a later session still renders after a stale teardown", async () => {
 	try {
 		await h.fire("session_start");
 		h.setStale(true);
-		h.countdown()?.fn();
+		h.tick()?.fn();
+		await h.settle();
 		assert.equal(h.intervals.size, 0);
 
 		h.setStale(false);
 		await h.fire("session_start");
-		assert.equal(h.intervals.size, 2, "a fresh session must re-arm both timers");
-		assert.doesNotThrow(() => h.countdown()?.fn());
+		assert.equal(h.intervals.size, 1, "a fresh session must re-arm the fetch timer");
+		assert.doesNotThrow(() => h.tick()?.fn());
 	} finally {
 		h.restore();
 	}
@@ -139,9 +159,29 @@ test("session_shutdown remains the primary cleanup", async () => {
 	const h = await harness();
 	try {
 		await h.fire("session_start");
-		assert.equal(h.intervals.size, 2);
+		assert.equal(h.intervals.size, 1);
 		await h.fire("session_shutdown");
-		assert.equal(h.intervals.size, 0, "session_shutdown must clear both timers");
+		assert.equal(h.intervals.size, 0, "session_shutdown must clear the timer");
+	} finally {
+		h.restore();
+	}
+});
+
+test("quota:changed carries raw windows so the footer can tick the countdown itself", async () => {
+	const h = await harness();
+	try {
+		await h.fire("session_start");
+		const payload = h.emitted.at(-1) as { wins: { label: string; resetAt?: number }[]; showReset: boolean };
+
+		assert.ok(payload, "session_start must emit quota:changed");
+		assert.ok(Array.isArray(payload.wins), "payload must carry raw windows, not pre-formatted text");
+		assert.deepEqual(
+			payload.wins.map((w) => w.label),
+			["5h", "wk"],
+		);
+		// resetAt is what lets the footer recompute the countdown on every repaint.
+		assert.ok(payload.wins.every((w) => typeof w.resetAt === "number"));
+		assert.equal(typeof payload.showReset, "boolean", "showReset must ride along for separate module copies");
 	} finally {
 		h.restore();
 	}
