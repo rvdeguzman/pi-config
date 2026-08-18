@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Breaking: subagent prompt references now use `&handle` instead of `@handle`.** `@` is reserved entirely for pi's file completion; the Claude-specific `agent-` alias is no longer recognized.
+
+### Changed
+- **Subagent prompt references use `&handle message`.** Autocomplete now triggers on `&`, including at token boundaries, while routing remains limited to a leading handle followed by a non-empty message. `&main` remains the escape hatch, and existing handles and tool arguments are unchanged.
+
 ## [0.17.0] - 2026-08-17
 
 > **⚠️ Note — an agent file's frontmatter `name:` now substitutes for the filename as its `subagent_type`.** Following Claude Code, the declared name is the dispatch identity and the filename is only the fallback, so `blubb.md` with `name: code-review` is spawned, mentioned and listed as `code-review`. Any value is accepted except one containing `:`, which Claude Code reserves for plugin scoping; such a file — like any unparseable one — is skipped with a warning rather than loaded under a name nothing honours, and `strictAgentFiles` turns that into a startup failure.

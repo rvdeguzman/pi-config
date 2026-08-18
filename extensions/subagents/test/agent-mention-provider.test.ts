@@ -1,12 +1,11 @@
 /**
- * agent-mention-provider.test.ts — the `@handle` suggestions stacked on pi's
+ * agent-mention-provider.test.ts — the `&handle` suggestions stacked on pi's
  * built-in autocomplete.
  *
- * The provider sits in front of file completion, so the risk is in the two
- * directions it can get the handoff wrong: claiming an `@` token that was meant
- * to attach a file (which would make `@src/…` uncompletable), or delegating one
- * that names a live agent (which buries the agent under fuzzy path matches).
- * Every case below pins one side of that boundary.
+ * The wrapper sits in front of pi's provider, so it must claim matching `&`
+ * handles while delegating every `@` token unchanged. Every case below pins one
+ * side of that boundary, including completion insertion because pi only adds a
+ * trailing space for its native `@` branch.
  */
 import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
@@ -77,25 +76,25 @@ describe("agent suggestions", () => {
     const current = builtIn();
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
 
-    const result = await suggest(provider, "@ex");
+    const result = await suggest(provider, "&ex");
 
     expect(result).toEqual({
-      items: [{ value: "@explore", label: "@explore", description: "send message · running · find flaky tests" }],
-      prefix: "@ex",
+      items: [{ value: "&explore", label: "&explore", description: "send message · running · find flaky tests" }],
+      prefix: "&ex",
     });
     expect(current.getSuggestions).not.toHaveBeenCalled();
   });
 
-  it("offers every agent on a bare @", async () => {
+  it("offers every agent on a bare &", async () => {
     const provider = createMentionProvider(
       builtIn(),
       () => mentionRoster(managerWith(record({ handle: "explore" }), record({ handle: "plan", startedAt: 2000 })), []),
       () => true,
     );
 
-    const result = await suggest(provider, "@");
+    const result = await suggest(provider, "&");
 
-    expect(result?.items.map(i => i.value)).toEqual(["@explore", "@plan"]);
+    expect(result?.items.map(i => i.value)).toEqual(["&explore", "&plan"]);
   });
 
   it("puts steerable agents first, then earliest-launched", async () => {
@@ -109,15 +108,15 @@ describe("agent suggestions", () => {
       () => true,
     );
 
-    const result = await suggest(provider, "@ex");
+    const result = await suggest(provider, "&ex");
 
-    expect(result?.items.map(i => i.value)).toEqual(["@explore-2", "@explore-3", "@explore"]);
+    expect(result?.items.map(i => i.value)).toEqual(["&explore-2", "&explore-3", "&explore"]);
   });
 
   it("matches case-insensitively", async () => {
     const provider = createMentionProvider(builtIn(), () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
 
-    expect((await suggest(provider, "@EX"))?.items.map(i => i.value)).toEqual(["@explore"]);
+    expect((await suggest(provider, "&EX"))?.items.map(i => i.value)).toEqual(["&explore"]);
   });
 
   it("completes a mention typed mid-message", async () => {
@@ -125,7 +124,7 @@ describe("agent suggestions", () => {
     // mention is actually sent — same split as Claude Code.
     const provider = createMentionProvider(builtIn(), () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
 
-    expect((await suggest(provider, "ask @ex"))?.prefix).toBe("@ex");
+    expect((await suggest(provider, "ask &ex"))?.prefix).toBe("&ex");
   });
 });
 
@@ -138,18 +137,18 @@ describe("agents that have never run", () => {
   it("offers a registered type with no live instance, and says it will start one", async () => {
     const provider = createMentionProvider(builtIn(), () => mentionRoster(managerWith(), TYPES), () => true);
 
-    expect(await suggest(provider, "@ex")).toEqual({
+    expect(await suggest(provider, "&ex")).toEqual({
       items: [{
-        value: "@explore",
-        label: "@explore",
+        value: "&explore",
+        label: "&explore",
         description: "start agent · Fast codebase exploration.",
       }],
-      prefix: "@ex",
+      prefix: "&ex",
     });
   });
 
   it("lets a live agent own its handle instead of listing the type twice", async () => {
-    // `@explore` has to mean the running Explore, or the mention would start a
+    // `&explore` has to mean the running Explore, or the mention would start a
     // second one while the first is mid-task.
     const provider = createMentionProvider(
       builtIn(),
@@ -157,9 +156,9 @@ describe("agents that have never run", () => {
       () => true,
     );
 
-    const result = await suggest(provider, "@ex");
+    const result = await suggest(provider, "&ex");
 
-    expect(result?.items.map(i => i.value)).toEqual(["@explore"]);
+    expect(result?.items.map(i => i.value)).toEqual(["&explore"]);
     expect(result?.items[0].description).toBe("send message · running · find flaky tests");
   });
 
@@ -170,7 +169,7 @@ describe("agents that have never run", () => {
       () => true,
     );
 
-    expect((await suggest(provider, "@ex"))?.items[0].description)
+    expect((await suggest(provider, "&ex"))?.items[0].description)
       .toBe("resume · completed · find flaky tests");
   });
 
@@ -181,8 +180,8 @@ describe("agents that have never run", () => {
       () => true,
     );
 
-    expect((await suggest(provider, "@"))?.items.map(i => i.value))
-      .toEqual(["@plan", "@explore", "@code-review"]);
+    expect((await suggest(provider, "&"))?.items.map(i => i.value))
+      .toEqual(["&plan", "&explore", "&code-review"]);
   });
 });
 
@@ -191,7 +190,7 @@ describe("delegation to pi's provider", () => {
     const current = builtIn();
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
 
-    expect(await suggest(provider, "@zz")).toBe(FILE_SUGGESTIONS);
+    expect(await suggest(provider, "&zz")).toBe(FILE_SUGGESTIONS);
     expect(current.getSuggestions).toHaveBeenCalled();
   });
 
@@ -199,14 +198,15 @@ describe("delegation to pi's provider", () => {
     const current = builtIn();
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
 
-    expect(await suggest(provider, "@explore/notes.md")).toBe(FILE_SUGGESTIONS);
+    expect(await suggest(provider, "&explore/notes.md")).toBe(FILE_SUGGESTIONS);
     expect(current.getSuggestions).toHaveBeenCalled();
   });
 
-  it("delegates an @ that is not at a token boundary", async () => {
+  it("delegates every @ token, even when it matches an agent handle", async () => {
     const current = builtIn();
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
 
+    expect(await suggest(provider, "@explore")).toBe(FILE_SUGGESTIONS);
     expect(await suggest(provider, "mail@ex")).toBe(FILE_SUGGESTIONS);
   });
 
@@ -215,14 +215,14 @@ describe("delegation to pi's provider", () => {
     const nested = record({ handle: "explore", parentAgentId: "parent-1" });
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(nested), []), () => true);
 
-    expect(await suggest(provider, "@ex")).toBe(FILE_SUGGESTIONS);
+    expect(await suggest(provider, "&ex")).toBe(FILE_SUGGESTIONS);
   });
 
   it("delegates everything while mentions are disabled", async () => {
     const current = builtIn();
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => false);
 
-    expect(await suggest(provider, "@ex")).toBe(FILE_SUGGESTIONS);
+    expect(await suggest(provider, "&ex")).toBe(FILE_SUGGESTIONS);
   });
 });
 
@@ -253,8 +253,8 @@ describe("composing with another extension's provider", () => {
       () => true,
     );
 
-    // ours wins for @, the inner wrapper still owns #, files still reach base
-    expect((await suggest(provider, "@ex"))?.items.map(i => i.value)).toEqual(["@explore"]);
+    // ours wins for &, the inner wrapper still owns #, files still reach base
+    expect((await suggest(provider, "&ex"))?.items.map(i => i.value)).toEqual(["&explore"]);
     expect((await suggest(provider, "#gen"))?.items.map(i => i.value)).toEqual(["#general"]);
     expect(await suggest(provider, "@src/")).toBe(FILE_SUGGESTIONS);
   });
@@ -264,8 +264,8 @@ describe("composing with another extension's provider", () => {
     const ours = createMentionProvider(base, () => mentionRoster(managerWith(), TYPES), () => true);
     const outer = hashWrapper(ours) as any;
 
-    expect((await outer.getSuggestions(["@ex"], 0, 3, { signal: new AbortController().signal }))
-      ?.items.map((i: any) => i.value)).toEqual(["@explore"]);
+    expect((await outer.getSuggestions(["&ex"], 0, 3, { signal: new AbortController().signal }))
+      ?.items.map((i: any) => i.value)).toEqual(["&explore"]);
     expect((await outer.getSuggestions(["#g"], 0, 2, { signal: new AbortController().signal }))
       ?.items.map((i: any) => i.value)).toEqual(["#general"]);
   });
@@ -286,8 +286,8 @@ describe("composing with another extension's provider", () => {
       collected.push(...(provider.triggerCharacters ?? []));
     }
 
-    expect(provider.triggerCharacters).toEqual(["@"]);   // ours declares only @
-    expect([...new Set(collected)]).toEqual(["#", "@"]); // pi still ends up with both
+    expect(provider.triggerCharacters).toEqual(["&"]);   // ours declares only &
+    expect([...new Set(collected)]).toEqual(["#", "&"]); // pi still ends up with both
   });
 
   it("can be rebuilt from the same factory without accumulating state", () => {
@@ -311,10 +311,10 @@ describe("against pi's real provider", () => {
 
   it("inserts the handle and a trailing space at the start of a line", async () => {
     const p = provider();
-    const suggestions = (await suggest(p, "@ex"))!;
+    const suggestions = (await suggest(p, "&ex"))!;
 
-    expect(p.applyCompletion(["@ex"], 0, 3, suggestions.items[0], suggestions.prefix)).toEqual({
-      lines: ["@explore "],
+    expect(p.applyCompletion(["&ex"], 0, 3, suggestions.items[0], suggestions.prefix)).toEqual({
+      lines: ["&explore "],
       cursorLine: 0,
       cursorCol: 9,
     });
@@ -322,10 +322,10 @@ describe("against pi's real provider", () => {
 
   it("replaces only the mention token when it sits mid-line", async () => {
     const p = provider();
-    const suggestions = (await suggest(p, "ask @ex"))!;
+    const suggestions = (await suggest(p, "ask &ex"))!;
 
-    expect(p.applyCompletion(["ask @ex"], 0, 7, suggestions.items[0], suggestions.prefix)).toEqual({
-      lines: ["ask @explore "],
+    expect(p.applyCompletion(["ask &ex"], 0, 7, suggestions.items[0], suggestions.prefix)).toEqual({
+      lines: ["ask &explore "],
       cursorLine: 0,
       cursorCol: 13,
     });
@@ -333,10 +333,10 @@ describe("against pi's real provider", () => {
 
   it("keeps text after the cursor intact", async () => {
     const p = provider();
-    const suggestions = (await suggest(p, "@ex"))!;
+    const suggestions = (await suggest(p, "&ex"))!;
 
-    expect(p.applyCompletion(["@ex please"], 0, 3, suggestions.items[0], suggestions.prefix).lines)
-      .toEqual(["@explore  please"]);
+    expect(p.applyCompletion(["&ex please"], 0, 3, suggestions.items[0], suggestions.prefix).lines)
+      .toEqual(["&explore  please"]);
   });
 
   it("declares a trigger character the editor will actually accept", () => {
@@ -350,17 +350,30 @@ describe("against pi's real provider", () => {
 });
 
 describe("insertion and trigger plumbing", () => {
-  it("hands applyCompletion to pi — its @-branch already inserts value plus a space", () => {
+  it("inserts & completion itself because pi only spaces @ attachments", () => {
     const current = builtIn();
     const provider = createMentionProvider(current, () => mentionRoster(managerWith(), []), () => true);
-    const item = { value: "@explore", label: "@explore" };
+    const item = { value: "&explore", label: "&explore" };
 
-    expect(provider.applyCompletion(["@ex"], 0, 3, item, "@ex")).toEqual({
+    expect(provider.applyCompletion(["&ex"], 0, 3, item, "&ex")).toEqual({
+      lines: ["&explore "],
+      cursorLine: 0,
+      cursorCol: 9,
+    });
+    expect(current.applyCompletion).not.toHaveBeenCalled();
+  });
+
+  it("delegates non-agent completion insertion unchanged", () => {
+    const current = builtIn();
+    const provider = createMentionProvider(current, () => mentionRoster(managerWith(), []), () => true);
+    const item = { value: "@src/index.ts", label: "src/index.ts" };
+
+    expect(provider.applyCompletion(["@src"], 0, 4, item, "@src")).toEqual({
       lines: ["applied"],
       cursorLine: 0,
       cursorCol: 7,
     });
-    expect(current.applyCompletion).toHaveBeenCalledWith(["@ex"], 0, 3, item, "@ex");
+    expect(current.applyCompletion).toHaveBeenCalledWith(["@src"], 0, 4, item, "@src");
   });
 
   it("keeps pi's file-completion gate rather than forcing it open", () => {
@@ -370,19 +383,19 @@ describe("insertion and trigger plumbing", () => {
     expect(provider.shouldTriggerFileCompletion?.(["/model"], 0, 6)).toBe(false);
   });
 
-  it("declares @ and nothing else", () => {
+  it("declares & and nothing else", () => {
     // `#` is pi's other default trigger, not ours — and the editor seeds its
     // own set from DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS (editor.js:1849)
     // and only adds, so claiming it here would gain nothing and mean nothing.
     const provider = createMentionProvider(builtIn(), () => mentionRoster(managerWith(), []), () => true);
 
-    expect(provider.triggerCharacters).toEqual(["@"]);
+    expect(provider.triggerCharacters).toEqual(["&"]);
   });
 });
 
 describe("named agents and evicted ones", () => {
   it("lists a named agent once, under its alias, and says what type it is", async () => {
-    // Two rows for one agent would read as two agents; and `@auth-audit`
+    // Two rows for one agent would read as two agents; and `&auth-audit`
     // alone says nothing about what it is, which the handle used to carry.
     const provider = createMentionProvider(
       builtIn(),
@@ -390,10 +403,10 @@ describe("named agents and evicted ones", () => {
       () => true,
     );
 
-    const items = (await suggest(provider, "@"))!.items;
+    const items = (await suggest(provider, "&"))!.items;
 
     expect(items).toEqual([
-      { value: "@auth-audit", label: "@auth-audit", description: "send message · Explore · running · audit the auth flow" },
+      { value: "&auth-audit", label: "&auth-audit", description: "send message · Explore · running · audit the auth flow" },
     ]);
   });
 
@@ -404,11 +417,11 @@ describe("named agents and evicted ones", () => {
       () => true,
     );
 
-    expect((await suggest(provider, "@"))!.items[0].description).toBe("send message · running · find flaky tests");
+    expect((await suggest(provider, "&"))!.items[0].description).toBe("send message · running · find flaky tests");
   });
 
   it("still resolves the unlisted type handle of a named agent", () => {
-    // The row shows the alias, but `@explore` must keep reaching this agent —
+    // The row shows the alias, but `&explore` must keep reaching this agent —
     // that is what stops it from starting a second Explore.
     const roster = mentionRoster(
       managerWith(record({ handle: "explore", alias: "auth-audit", type: "Explore", status: "running" })),
@@ -426,8 +439,8 @@ describe("named agents and evicted ones", () => {
       () => true,
     );
 
-    expect((await suggest(provider, "@"))!.items).toEqual([
-      { value: "@explore", label: "@explore", description: "resume · Explore · audit the RPC path" },
+    expect((await suggest(provider, "&"))!.items).toEqual([
+      { value: "&explore", label: "&explore", description: "resume · Explore · audit the RPC path" },
     ]);
   });
 
@@ -440,11 +453,11 @@ describe("named agents and evicted ones", () => {
     } as unknown as AgentManager;
     const provider = createMentionProvider(builtIn(), () => mentionRoster(manager, []), () => true);
 
-    expect((await suggest(provider, "@"))!.items.map(i => i.value)).toEqual(["@plan", "@explore"]);
+    expect((await suggest(provider, "&"))!.items.map(i => i.value)).toEqual(["&plan", "&explore"]);
   });
 
   it("keeps an aliased tombstone's type handle reserved too", () => {
-    // It lists under its alias, but `@explore` still resumes it — so the
+    // It lists under its alias, but `&explore` still resumes it — so the
     // Explore type must not also be offered as startable under that name.
     const roster = mentionRoster(
       managerWithTombstones(tombstone({ handle: "explore", alias: "auth-audit" })),
@@ -455,7 +468,7 @@ describe("named agents and evicted ones", () => {
   });
 
   it("does not offer a startable type whose handle a tombstone still holds", () => {
-    // `@explore` resumes the old conversation, so advertising "start agent"
+    // `&explore` resumes the old conversation, so advertising "start agent"
     // under the same name would promise the wrong action.
     const roster = mentionRoster(managerWithTombstones(tombstone()), [{ name: "Explore", description: "search" }]);
 
@@ -466,7 +479,7 @@ describe("named agents and evicted ones", () => {
 
 // FleetView, the widget, the tool header and the conversation viewer all render
 // `display_name` (via getConfig). The popup rendering the raw type instead would
-// make `@` the one surface that calls the same agent something else.
+// make `&` the one surface that calls the same agent something else.
 describe("rows carry the display name, not the raw type", () => {
   const label = (type: string) => (type === "Explore" ? "Auth Auditor" : type);
 
@@ -481,7 +494,7 @@ describe("rows carry the display name, not the raw type", () => {
       () => true,
     );
 
-    expect((await suggest(provider, "@"))!.items[0].description)
+    expect((await suggest(provider, "&"))!.items[0].description)
       .toBe("send message · Auth Auditor · running · audit the auth flow");
   });
 
@@ -492,7 +505,7 @@ describe("rows carry the display name, not the raw type", () => {
       () => true,
     );
 
-    expect((await suggest(provider, "@"))!.items[0].description)
+    expect((await suggest(provider, "&"))!.items[0].description)
       .toBe("resume · Auth Auditor · audit the RPC path");
   });
 
@@ -505,6 +518,6 @@ describe("rows carry the display name, not the raw type", () => {
       () => true,
     );
 
-    expect((await suggest(provider, "@"))!.items[0].description).toContain("· Explore ·");
+    expect((await suggest(provider, "&"))!.items[0].description).toContain("· Explore ·");
   });
 });

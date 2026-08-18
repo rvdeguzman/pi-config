@@ -1,14 +1,13 @@
 /**
- * mention.ts — the `@handle` grammar for messaging a subagent from the prompt.
+ * mention.ts — the `&handle` grammar for messaging a subagent from the prompt.
  *
- * Claude Code lets you type `@code-review take another look` at the prompt and
- * routes the message to that agent instead of the main model. Its grammar is
- * reproduced here so the two behave identically:
+ * `@` remains exclusively available to pi's file attachments. Subagents use a
+ * separate, deliberately narrow grammar:
  *
- *   - suggestions fire on `@` at the start of the input or after whitespace,
- *     followed by `[\w-]*` (so `@src/foo.ts` is a file, never an agent);
+ *   - suggestions fire on `&` at the start of the input or after whitespace,
+ *     followed by `[\w-]*`;
  *   - a send is recognized only at the START of the input, and only with a
- *     non-empty message after the handle. That is why a bare `@code-review`
+ *     non-empty message after the handle. That is why a bare `&code-review`
  *     goes to the main model rather than anywhere near the agent.
  *
  * A record's own identity is a UUID plus a deliberately non-unique description,
@@ -20,14 +19,14 @@
  */
 
 /**
- * Suggestion trigger: `@` at a token boundary plus the partial handle typed so
- * far. Ported from Claude Code, including the CJK sentence-ending punctuation
- * it accepts as a boundary.
+ * Suggestion trigger: `&` at a token boundary plus the partial handle typed so
+ * far. Includes the CJK sentence-ending punctuation Claude Code accepts as a
+ * boundary.
  */
-export const MENTION_TRIGGER = /(^|[\s。、？！])@([\w-]*)$/;
+export const MENTION_TRIGGER = /(^|[\s。、？！])&([\w-]*)$/;
 
-/** Send grammar: leading `@handle`, then a non-empty message. */
-const MENTION_SEND = /^@([\w-]+)\s+([\s\S]+)$/;
+/** Send grammar: leading `&handle`, then a non-empty message. */
+const MENTION_SEND = /^&([\w-]+)\s+([\s\S]+)$/;
 
 /**
  * Upper bound on a handle, matching Claude Code's `dSS`. Nothing here generates
@@ -43,7 +42,7 @@ const MAX_HANDLE_LENGTH = 64;
  */
 const RESERVED_HANDLES: ReadonlySet<string> = new Set(["main"]);
 
-/** Whether `@handle` names the main conversation rather than any subagent. */
+/** Whether `&handle` names the main conversation rather than any subagent. */
 export function isReservedHandle(handle: string): boolean {
   return RESERVED_HANDLES.has(handle.toLowerCase());
 }
@@ -75,7 +74,7 @@ export function assignHandle(base: string, taken: ReadonlySet<string>): string {
 }
 
 /**
- * Map a typed handle back to a registered agent type, so `@explore fix it`
+ * Map a typed handle back to a registered agent type, so `&explore fix it`
  * reaches the Explore agent even when no instance has ever run. `handleBase` is
  * the single source of truth in both directions, so a type is addressable by
  * exactly the handle its instances would be given.
@@ -86,18 +85,6 @@ export function resolveHandleToType(handle: string, types: readonly string[]): s
   // it — `assignHandle` refuses that name too, so its instances never hold one.
   if (RESERVED_HANDLES.has(wanted)) return undefined;
   return types.find(type => handleBase(type) === wanted);
-}
-
-/**
- * Claude Code documents `@agent-<name>` as the form you type by hand when the
- * picker isn't involved. Accepted here as an exact synonym: the caller tries the
- * handle as written first, so an agent genuinely called `agent-foo` still wins
- * over `@agent-` + `foo`, and only falls back to this when that finds nothing.
- * Returns undefined when the prefix is absent or is the whole handle.
- */
-export function stripAgentPrefix(handle: string): string | undefined {
-  const rest = /^agent-(.+)$/i.exec(handle)?.[1];
-  return rest || undefined;
 }
 
 /**
@@ -113,7 +100,7 @@ export function describeMention(message: string): string {
 
 /**
  * What Claude Code sends the main model when a mention names an agent it could
- * start. Its `@agent-<type>` mention is not a spawn at all: it becomes an
+ * start. Its agent mention is not a spawn at all: it becomes an
  * `agent_mention` attachment, which renders to a synthetic `isMeta` user
  * message placed after the user's own untouched text — no tool forcing, no
  * allowed-tools narrowing, and the Task tool is not even named. The model reads
@@ -130,8 +117,8 @@ export function agentMentionReminder(type: string): string {
 }
 
 /**
- * Split `@handle message` into its parts, or null when the text isn't a send —
- * a bare handle, a leading file path, or a mention that isn't at the start.
+ * Split `&handle message` into its parts, or null when the text isn't a send —
+ * a bare handle or a mention that isn't at the start.
  */
 export function parseMention(text: string): { handle: string; message: string } | null {
   const match = MENTION_SEND.exec(text);

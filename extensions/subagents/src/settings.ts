@@ -86,9 +86,10 @@ export interface SubagentsSettings {
    */
   fleetView?: boolean;
   /**
-   * Whether `@handle message` typed at the prompt is routed to that subagent
-   * instead of the main model, and whether `@` offers running agents alongside
-   * pi's file completion. Defaults to `model`. Applied live.
+   * Whether `&handle message` typed at the prompt is routed to that subagent
+   * instead of the main model, and whether `&` offers agent completion while
+   * `@` remains exclusively available to pi's files. Defaults to `model`.
+   * Applied live.
    *
    *   - `model`: mentioning an agent that is not running asks the main model to
    *     spawn it with the `Agent` tool, Claude Code's behaviour. Costs a turn,
@@ -104,7 +105,7 @@ export interface SubagentsSettings {
    */
   agentMentions?: AgentMentionMode;
   /**
-   * Whether subagents persist their pi session by default, so `@handle` can
+   * Whether subagents persist their pi session by default, so `&handle` can
    * reopen an agent's conversation long after its in-memory record is gone.
    * Defaults to `true`. Per-agent `persist_session:` frontmatter overrides it
    * in both directions. Turning it off restores the previous behaviour, where

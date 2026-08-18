@@ -26,7 +26,7 @@ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
-import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
+import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
@@ -562,7 +562,7 @@ export default function (pi: ExtensionAPI) {
     // path this extension itself recorded — never from anything a caller sent.
     delete safeOptions.resumeSessionFile;
     // Bypasses handle allocation, so a forged value would duplicate a live
-    // agent's name and make `@handle` ambiguous. Same rule: dispatcher only.
+    // agent's name and make `&handle` ambiguous. Same rule: dispatcher only.
     delete safeOptions.reclaim;
     return spawnResolved(piRef, ctxRef, type, prompt, safeOptions);
   };
@@ -605,7 +605,7 @@ export default function (pi: ExtensionAPI) {
   // (currentCtx would stay undefined → spawn always "No active session"). Gating
   // here makes a filtered session behave like an absent one (#142).
   let rpcHandle: RpcHandle | undefined;
-  /** Whether the `@handle` autocomplete wrapper has been stacked on pi's provider. */
+  /** Whether the `&handle` autocomplete wrapper has been stacked on pi's provider. */
   let mentionProviderRegistered = false;
 
   // ---- Subagent scheduler ----
@@ -660,7 +660,7 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:ready", {});
     }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
-    // Stack `@handle` suggestions on pi's built-in autocomplete. Registered at
+    // Stack `&handle` suggestions on pi's built-in autocomplete. Registered at
     // most once per activation: pi appends wrappers to a list it never prunes,
     // so a second call would layer a duplicate provider on the first. TUI only
     // — print mode has no such method, and RPC mode's is a no-op.
@@ -678,29 +678,28 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  /** Agent types `@` can start, in the shape the roster wants. */
+  /** Agent types `&` can start, in the shape the roster wants. */
   const mentionTypes = (): TypeInfo[] =>
     getAvailableTypes().map(name => ({ name, description: getAgentConfig(name)?.description ?? name }));
 
   /**
-   * `@handle message` typed at the prompt addresses that agent instead of the
-   * main model — Claude Code's prompt mention, same grammar (see mention.ts).
+   * `&handle message` typed at the prompt addresses that agent instead of the
+   * main model. `@` remains exclusively available for pi's file attachments.
    *
    * The handle names the *agent*, not one process, so one syntax covers its
    * whole lifecycle: message it while it runs, resume it once it has finished,
    * start it if it never ran. Everything that isn't an agent mention falls
-   * through untouched, which is what keeps `@src/foo.ts summarize this`, a bare
-   * `@handle`, and ordinary prose working. A delivered mention costs no
-   * main-model turn; the answer arrives through the ordinary completion
-   * notification either way.
+   * through untouched, including a bare `&handle` and ordinary prose. A
+   * delivered mention costs no main-model turn; the answer arrives through the
+   * ordinary completion notification either way.
    */
   pi.on("input", async (event, ctx) => {
     // Never hijack text the extension layer itself submitted (pi.sendMessage,
     // scheduled prompts) — only something a person typed can be a mention.
     if (event.source === "extension" || !isAgentMentionsEnabled()) return { action: "continue" };
-    // Claiming the turn is TUI only, matching the `@` completion that teaches
+    // Claiming the turn is TUI only, matching the `&` completion that teaches
     // the syntax. Pi defaults `session.prompt()` to source "interactive", so a
-    // headless `pi -p "@explore …"` reaches here too — and claiming it would
+    // headless `pi -p "&explore …"` reaches here too — and claiming it would
     // answer with silence, which the background hold cannot fix: `handled`
     // returns from prompt() before any turn starts, so the loop that patch wraps
     // never runs (it holds subagents spawned by the Agent tool MID-turn, a
@@ -717,7 +716,7 @@ export default function (pi: ExtensionAPI) {
     const mention = parseMention(event.text);
     if (!mention) return { action: "continue" };
 
-    // `@main` addresses the main conversation, never a subagent — the one name
+    // `&main` addresses the main conversation, never a subagent — the one name
     // `assignHandle` refuses to allocate. An explicit escape hatch for text
     // that would otherwise read as a mention, so the prefix is dropped and the
     // rest goes to the model with its attachments intact.
@@ -725,11 +724,7 @@ export default function (pi: ExtensionAPI) {
       return { action: "transform", text: mention.message, ...(event.images && { images: event.images }) };
     }
 
-    // As typed first, so an agent actually called `agent-foo` wins over Claude
-    // Code's `@agent-` + `foo` spelling rather than being shadowed by it.
-    const alias = stripAgentPrefix(mention.handle);
-    const resolved = manager.resolveMention(mention.handle)
-      ?? (alias ? manager.resolveMention(alias) : undefined);
+    const resolved = manager.resolveMention(mention.handle);
 
     // Steering and resuming are direct in every mode, so headless they are not
     // available at all. Falling through here rather than dropping to the start
@@ -739,7 +734,7 @@ export default function (pi: ExtensionAPI) {
 
     if (resolved?.kind === "live") {
       const record = resolved.record;
-      const target = `@${record.alias ?? record.handle ?? mention.handle}`;
+      const target = `&${record.alias ?? record.handle ?? mention.handle}`;
 
       if (record.status === "running" || record.status === "queued") {
         // Steering interrupts after the current tool call, exactly like the
@@ -779,7 +774,7 @@ export default function (pi: ExtensionAPI) {
     // and `reclaim` hands it back the names the tombstone was holding.
     if (resolved?.kind === "tombstone") {
       const entry = resolved.entry;
-      const target = `@${entry.alias ?? entry.handle}`;
+      const target = `&${entry.alias ?? entry.handle}`;
 
       // Checked here rather than left to SessionManager.open: that runs inside
       // runAgent, whose rejection lands on the record as an agent error, not in
@@ -838,13 +833,11 @@ export default function (pi: ExtensionAPI) {
 
     // No agent under that handle — but the name may still be an agent type, in
     // which case the mention starts one.
-    const typeHandle = mention.handle;
-    const type = resolveHandleToType(typeHandle, getAvailableTypes())
-      ?? (alias ? resolveHandleToType(alias, getAvailableTypes()) : undefined);
+    const type = resolveHandleToType(mention.handle, getAvailableTypes());
     if (!type) return { action: "continue" };
 
-    // Claude Code never starts the agent itself: `@agent-<type>` becomes an
-    // attachment asking the main model to do it, and the model writes the
+    // Claude Code's agent mention becomes an attachment asking the main model
+    // to start it, and the model writes the
     // agent's prompt from the conversation rather than forwarding the typed
     // text. That buys a real `Agent` tool call — transcript, per-tool widget
     // detail, tool-use-id correlation, join grouping — and a prompt with the
@@ -856,7 +849,7 @@ export default function (pi: ExtensionAPI) {
     // prompt, off-screen, holding only the `Agent` tool. Nothing reaches the
     // chat, and what it starts is an ordinary top-level agent.
     if (getAgentMentionMode() === "model") {
-      const label = `@${handleBase(type)}`;
+      const label = `&${handleBase(type)}`;
       ctx.ui.notify(`Starting ${label}…`, "info");
       // Not awaited: the clone runs a full model turn, and prompt() is blocked
       // until this hook returns. The user gets their prompt back immediately
@@ -893,9 +886,9 @@ export default function (pi: ExtensionAPI) {
         description: describeMention(mention.message),
         isBackground: true,
       });
-      ctx.ui.notify(`Started @${handleBase(type)}`, "info");
+      ctx.ui.notify(`Started &${handleBase(type)}`, "info");
     } catch (err) {
-      ctx.ui.notify(`Could not start @${handleBase(type)}: ${err instanceof Error ? err.message : String(err)}`, "error");
+      ctx.ui.notify(`Could not start &${handleBase(type)}: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
     return { action: "handled" };
   });
@@ -942,7 +935,7 @@ export default function (pi: ExtensionAPI) {
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
 
-  // Claude Code-style `@handle message` prompt mentions. Read live by both the
+  // `&handle message` prompt mentions. Read live by both the
   // `input` hook and the stacked autocomplete provider, so the toggle applies
   // immediately — the provider itself can never be unregistered (pi's wrapper
   // list is append-only), it just delegates everything when this is off.
@@ -1043,7 +1036,7 @@ export default function (pi: ExtensionAPI) {
    * batching, the widget/fleet refresh, and the `subagents:created` event.
    *
    * Shared by the Agent tool's `resume` + `run_in_background` branch and the
-   * `@handle message` prompt mention — they differ only in how they report the
+   * `&handle message` prompt mention — they differ only in how they report the
    * outcome. Returns the record, or undefined when the manager refused because
    * the agent is still running (see AgentManager.resume).
    *
@@ -1364,7 +1357,7 @@ Terse command-style prompts produce shallow, generic work.
       name: Type.Optional(
         Type.String({
           description:
-            'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.',
+            'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `&name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.',
         }),
       ),
       subagent_type: Type.String({
@@ -2782,14 +2775,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "agentMentions",
           label: "Agent mentions",
-          description: "Route `@handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
+          description: "Route `&handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
           currentValue: getAgentMentionMode(),
           values: ["model", "direct", "off"],
         },
         {
           id: "rememberAgents",
           label: "Remember agents",
-          description: "Persist subagent sessions so `@handle` can resume one long after it finished (they also appear in /resume)",
+          description: "Persist subagent sessions so `&handle` can resume one long after it finished (they also appear in /resume)",
           currentValue: getRememberAgents() ? "on" : "off",
           values: ["on", "off"],
         },

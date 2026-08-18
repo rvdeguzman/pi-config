@@ -1,10 +1,10 @@
 /**
- * agent-mention.ts — what `@` can address, and the suggestions pi renders for it.
+ * agent-mention.ts — what `&` can address, and the suggestions pi renders for it.
  *
  * A subagent is addressable whether or not it is currently running: a live
  * record is messaged or resumed, an evicted one whose session is still on disk
  * is reopened, and an agent *type* with no instance at all is started. That is
- * the point of the handle — `@explore` means the Explore agent, not "the
+ * the point of the handle — `&explore` means the Explore agent, not "the
  * Explore process that happens to exist right now" — so the roster below unions
  * all three, and the dispatcher and the popup read the same list.
  *
@@ -13,15 +13,14 @@
  * under the alias, with its type moved into the description so the row still
  * says what it is.
  *
- * pi's `CombinedAutocompleteProvider` already owns `@`, where it means "attach a
- * file". Extensions can wrap it (`ctx.ui.addAutocompleteProvider`), so this
- * provider answers the `@` tokens that name an agent and delegates every other
- * one — including all of `applyCompletion`, whose `@`-branch already inserts
- * `item.value` plus a trailing space, which is exactly what a handle needs.
+ * pi's `CombinedAutocompleteProvider` owns `@` for file attachments, so this
+ * wrapper claims only `&` and delegates every other token unchanged. Pi has no
+ * built-in `&` completion branch, so this provider inserts its own trailing
+ * space after a selected handle.
  *
- * Matching mirrors Claude Code: case-insensitive prefix (not fuzzy), and when
- * any agent matches, files are dropped from the list rather than mixed in — an
- * `@name` that names an agent is never also a path. Offering never-started
+ * Matching is a case-insensitive prefix (not fuzzy). `&` has no file meaning,
+ * so agent suggestions never compete with pi's `@` attachment completion.
+ * Offering never-started
  * types is a deliberate step beyond it; Claude Code's registry holds only live
  * tasks, so an agent you had not launched yet was unaddressable.
  */
@@ -32,7 +31,7 @@ import { handleBase, MENTION_TRIGGER } from "../mention.js";
 import type { AgentRecord, AgentTombstone } from "../types.js";
 
 /**
- * One thing `@` can address, and what sending to it will do. `typeLabel` is the
+ * One thing `&` can address, and what sending to it will do. `typeLabel` is the
  * agent's `display_name`, resolved by the caller: this module stays independent
  * of the type registry, but the popup must agree with FleetView and the widget,
  * which both render the label rather than the raw type.
@@ -46,10 +45,10 @@ export type MentionTarget =
 export type TypeInfo = { name: string; description: string };
 
 /**
- * Everything `@` can reach, in the order the popup lists it: steerable agents
+ * Everything `&` can reach, in the order the popup lists it: steerable agents
  * first, then the other live ones earliest-launched, then agent types with no
  * live instance. A type whose handle a record already holds is omitted — that
- * name addresses the existing agent, which is what makes `@explore` mean
+ * name addresses the existing agent, which is what makes `&explore` mean
  * "message the one that's running" and only otherwise "start one".
  */
 export function mentionRoster(
@@ -104,11 +103,11 @@ export function createMentionProvider(
   isEnabled: () => boolean,
 ): AutocompleteProvider {
   return {
-    // Only `@` — the contract is "characters that should naturally trigger
+    // Only `&` — the contract is "characters that should naturally trigger
     // THIS provider", and pi unions each wrapper's own set onto the outermost
     // one itself (interactive-mode.js:432), so re-declaring the wrapped
     // provider's characters here would both misreport us and duplicate that.
-    triggerCharacters: ["@"],
+    triggerCharacters: ["&"],
 
     async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
       const items = isEnabled() ? mentionItems(roster(), lines[cursorLine] ?? "", cursorCol) : null;
@@ -117,7 +116,19 @@ export function createMentionProvider(
     },
 
     applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-      return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+      if (!prefix.startsWith("&")) {
+        return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+      }
+      const currentLine = lines[cursorLine] ?? "";
+      const beforePrefix = currentLine.slice(0, cursorCol - prefix.length);
+      const newLine = `${beforePrefix}${item.value} ${currentLine.slice(cursorCol)}`;
+      const newLines = [...lines];
+      newLines[cursorLine] = newLine;
+      return {
+        lines: newLines,
+        cursorLine,
+        cursorCol: beforePrefix.length + item.value.length + 1,
+      };
     },
 
     shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
@@ -135,9 +146,9 @@ function mentionItems(roster: MentionTarget[], line: string, cursorCol: number):
   const items: AutocompleteItem[] = [];
   for (const target of roster) {
     if (!target.handle.toLowerCase().startsWith(typed)) continue;
-    items.push({ value: `@${target.handle}`, label: `@${target.handle}`, description: describeTarget(target) });
+    items.push({ value: `&${target.handle}`, label: `&${target.handle}`, description: describeTarget(target) });
   }
-  return items.length > 0 ? { items, prefix: `@${match[2]}` } : null;
+  return items.length > 0 ? { items, prefix: `&${match[2]}` } : null;
 }
 
 /** Name the action that will actually happen, so the list never mispromises. */
@@ -151,7 +162,7 @@ function describeTarget(target: MentionTarget): string {
   const { status, description, alias } = target.record;
   const action = status === "running" || status === "queued" ? "send message" : "resume";
   // A row listed under its alias has lost the type its handle would have shown,
-  // so name it — `@auth-audit` alone says nothing about what the agent is.
+  // so name it — `&auth-audit` alone says nothing about what the agent is.
   // A type-derived row already reads as its type and would just repeat itself.
   const identity = alias ? `${target.typeLabel} · ` : "";
   return `${action} · ${identity}${status} · ${description}`;

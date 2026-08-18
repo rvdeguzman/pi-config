@@ -80,7 +80,7 @@ interface SpawnOptions {
   description: string;
   /**
    * Optional memorable name for this instance, becoming a second handle
-   * (`@auth-audit`) alongside the type-derived one. Slugged, not validated —
+   * (`&auth-audit`) alongside the type-derived one. Slugged, not validated —
    * anything unusable degrades via `handleBase` rather than failing the spawn.
    */
   name?: string;
@@ -814,7 +814,7 @@ export class AgentManager {
       if (record.handle) taken.add(record.handle);
       if (record.alias) taken.add(record.alias);
     }
-    // Tombstones hold their names too: an evicted `@explore` is still
+    // Tombstones hold their names too: an evicted `&explore` is still
     // resurrectable, so a later Explore must become `explore-2` rather than
     // shadowing a conversation the user can still reach.
     for (const entry of this.tombstones.values()) {
@@ -825,10 +825,10 @@ export class AgentManager {
   }
 
   /**
-   * Resolve an `@name` from the prompt. Matches a top-level agent's handle
+   * Resolve an `&name` from the prompt. Matches a top-level agent's handle
    * case-insensitively, preferring one that can still be steered and otherwise
    * the most recently started (which is the one a resume should continue), then
-   * falls back to an exact agent id so `@<agentId>` works too.
+   * falls back to an exact agent id so `&<agentId>` works too.
    */
   resolveMention(name: string): MentionResolution | undefined {
     const wanted = name.toLowerCase();
@@ -906,7 +906,7 @@ export class AgentManager {
   }
 
   /**
-   * Preserve enough of a departing record for `@handle` to reopen its
+   * Preserve enough of a departing record for `&handle` to reopen its
    * conversation later. Nothing to keep unless it has both a handle to be
    * addressed by and a session file to reopen — an in-memory session leaves no
    * transcript, so the mention would have nothing to continue from.
@@ -955,7 +955,7 @@ export class AgentManager {
     // `session_before_switch`), and `skipUnconsumed` only spares records whose
     // results the LLM has yet to read — it does not make the sweep partial in
     // the sense that matters here. A new session means new handles, or
-    // `@explore` would silently reach an agent the user never started. Claude
+    // `&explore` would silently reach an agent the user never started. Claude
     // Code resets its registry on `/clear` for the same reason.
     this.tombstones.clear();
   }

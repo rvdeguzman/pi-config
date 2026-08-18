@@ -102,12 +102,12 @@ export type JoinMode = 'async' | 'group' | 'smart';
 export type WidgetMode = 'all' | 'background' | 'off';
 
 /**
- * How `@handle message` starts an agent that is not already running.
+ * How `&handle message` starts an agent that is not already running.
  * - `model`: inject Claude Code's `agent_mention` reminder and let the main
  *   model spawn it with the `Agent` tool, which is what Claude Code does.
  * - `direct`: spawn it here, immediately, with the typed message as its prompt
  *   and no main-model turn spent.
- * - `off`: `@` means only "attach a file" again.
+ * - `off`: `&` remains ordinary prompt text.
  *
  * Messaging a running agent and resuming a finished one are direct in every
  * mode — Claude Code only differs from us on the *new* invocation.
@@ -115,7 +115,7 @@ export type WidgetMode = 'all' | 'background' | 'off';
 export type AgentMentionMode = 'model' | 'direct' | 'off';
 
 /**
- * What survives a record's eviction so `@handle` keeps working. The live record
+ * What survives a record's eviction so `&handle` keeps working. The live record
  * is discarded after ~10 minutes, but the pi session it wrote is still on disk,
  * and this is the little that is needed to find and describe it again.
  */
@@ -131,7 +131,7 @@ export interface AgentTombstone {
 }
 
 /**
- * What `@handle` resolved to: an agent still in memory, or the remains of one
+ * What `&handle` resolved to: an agent still in memory, or the remains of one
  * whose conversation can be reopened from disk.
  */
 export type MentionResolution =
@@ -142,17 +142,17 @@ export interface AgentRecord {
   id: string;
   type: SubagentType;
   /**
-   * Typeable name for the `@handle message` prompt mention, derived from the
+   * Typeable name for the `&handle message` prompt mention, derived from the
    * agent type and numbered when siblings collide (`explore`, `explore-2`).
    * Top-level agents only — nested children are hidden from every top-level
    * surface, so nothing can address them.
    */
   handle?: string;
   /**
-   * A second, memorable handle from the spawner's `name` (`@auth-audit`), drawn
+   * A second, memorable handle from the spawner's `name` (`&auth-audit`), drawn
    * from the same namespace as `handle` so the two can never collide. Purely
    * additive: `handle` is assigned regardless, so a named agent stays reachable
-   * by its type and `@explore` never comes to mean "start another one".
+   * by its type and `&explore` never comes to mean "start another one".
    */
   alias?: string;
   description: string;

@@ -42,7 +42,7 @@ export function makePi(): BootedPi {
 export function ctx(overrides: Record<string, unknown> = {}) {
   return {
     // The interactive mode extensions normally run in. Set explicitly because
-    // the `@handle` input hook is TUI-only, so an absent mode would make every
+    // the `&handle` input hook is TUI-only, so an absent mode would make every
     // mention test exercise the headless fall-through instead.
     mode: "tui",
     hasUI: false,

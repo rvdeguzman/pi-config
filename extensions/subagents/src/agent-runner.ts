@@ -314,7 +314,7 @@ export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurn
 
 /**
  * Project default for `persist_session`, from the `rememberAgents` setting.
- * On by default: a persisted session is what lets `@handle` reopen an agent's
+ * On by default: a persisted session is what lets `&handle` reopen an agent's
  * conversation after its record has been evicted, which is the whole point of
  * addressing an agent by a name that outlives one run. Per-agent frontmatter
  * still overrides it in both directions.
