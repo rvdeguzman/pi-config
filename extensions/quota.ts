@@ -27,8 +27,8 @@ export const setShowReset = (on: boolean) => {
 	showReset = on;
 };
 
-export function formatReset(resetAt: number | undefined, now = Date.now()): string {
-	if (!showReset || resetAt == null || !Number.isFinite(resetAt)) return "";
+export function formatReset(resetAt: number | undefined, now = Date.now(), show = showReset): string {
+	if (!show || resetAt == null || !Number.isFinite(resetAt)) return "";
 	const minutes = Math.max(0, Math.ceil((resetAt - now) / 60_000));
 	const days = Math.floor(minutes / 1_440);
 	const hours = Math.floor((minutes % 1_440) / 60);
@@ -38,10 +38,10 @@ export function formatReset(resetAt: number | undefined, now = Date.now()): stri
 	return `${mins}m`;
 }
 
-export function formatQuota(wins: readonly Win[], now = Date.now()): string {
+export function formatQuota(wins: readonly Win[], now = Date.now(), showResets = showReset): string {
 	return wins
 		.map((w) => {
-			const reset = formatReset(w.resetAt, now);
+			const reset = formatReset(w.resetAt, now, showResets);
 			return `${w.label} ${Math.round(w.pct)}%${reset ? ` ${reset}` : ""}`;
 		})
 		.join(" ");
@@ -55,12 +55,12 @@ function loadCache(): Cache {
 	}
 }
 
-/** Return cached windows if fresh, else fetch and update the cache. */
-async function cached(key: string, fetcher: () => Promise<Win[]>): Promise<Win[]> {
+/** Return cached windows if fresh, else fetch and update the cache. `force` bypasses TTL and 429 backoff (manual reload). */
+async function cached(key: string, fetcher: () => Promise<Win[]>, force = false): Promise<Win[]> {
 	const cache = loadCache();
 	const e = cache[key];
 	const now = Date.now();
-	if (e && ((e.version === CACHE_VERSION && now - e.at < TTL[key]) || (e.backoffUntil ?? 0) > now)) return e.wins;
+	if (!force && e && ((e.version === CACHE_VERSION && now - e.at < TTL[key]) || (e.backoffUntil ?? 0) > now)) return e.wins;
 	try {
 		const wins = await fetcher();
 		if (wins.length) cache[key] = { at: now, wins, version: CACHE_VERSION };
@@ -171,74 +171,127 @@ export default function (pi: ExtensionAPI) {
 	let countdownTimer: ReturnType<typeof setInterval> | undefined;
 	let lastFetch = 0;
 	let lastWins: Win[] = [];
+	// Bumped on every session_start/session_shutdown. An async refresh captures the
+	// generation it started in and drops its result if the session moved on, so a
+	// slow fetch (up to 10s) can't paint stale quota into the next session.
+	let generation = 0;
+
+	function stopTimers() {
+		clearInterval(timer);
+		clearInterval(countdownTimer);
+		timer = undefined;
+		countdownTimer = undefined;
+	}
+
+	/**
+	 * Touch `ctx` defensively and report whether it was still live.
+	 *
+	 * Clearing the timers in session_shutdown is necessary but not sufficient: it only
+	 * holds if pi delivers session_shutdown to the same closure that armed the timer
+	 * before invalidating that ctx. That contract has been observed to break (a stale
+	 * ctx reached renderQuota from a timer and killed pi). A throw inside a bare
+	 * setInterval callback is an uncaughtException that takes down the whole process,
+	 * which is absurd for a cosmetic footer widget, so every ctx access from a timer
+	 * goes through here and tears the timers down on the first stale hit.
+	 */
+	function withLiveCtx(fn: () => void): boolean {
+		try {
+			fn();
+			return true;
+		} catch (err) {
+			// Stale ctx: this closure lost its session. Stop rendering for good.
+			if (/ctx is stale/i.test((err as Error)?.message ?? "")) stopTimers();
+			// Any other render failure is cosmetic; never let it escape into the timer.
+			return false;
+		}
+	}
 
 	function renderQuota(ctx: ExtensionContext) {
 		if (lastWins.length === 0) return;
-		const theme = ctx.ui.theme;
-		const pct = (n: number) => {
-			const v = Math.round(n);
-			return theme.fg(v >= 90 ? "error" : v >= 70 ? "warning" : "success", `${v}%`);
-		};
-		ctx.ui.setStatus(
-			"quota",
-			lastWins
-				.map((w) => {
-					const reset = formatReset(w.resetAt);
-					return `${theme.fg("dim", w.label)} ${pct(w.pct)}${reset ? ` ${theme.fg("dim", reset)}` : ""}`;
-				})
-				.join(" "),
-		);
-		// Pre-formatted text for custom footers (e.g. minimal-footer) that replace the built-in
-		// one: they may hold a separate module copy of showReset, so gate the countdown here.
-		pi.events.emit("quota:changed", formatQuota(lastWins));
+		withLiveCtx(() => {
+			const theme = ctx.ui.theme;
+			const pct = (n: number) => {
+				const v = Math.round(n);
+				return theme.fg(v >= 90 ? "error" : v >= 70 ? "warning" : "success", `${v}%`);
+			};
+			ctx.ui.setStatus(
+				"quota",
+				lastWins
+					.map((w) => {
+						const reset = formatReset(w.resetAt);
+						return `${theme.fg("dim", w.label)} ${pct(w.pct)}${reset ? ` ${theme.fg("dim", reset)}` : ""}`;
+					})
+					.join(" "),
+			);
+			// Pre-formatted text for custom footers (e.g. minimal-footer) that replace the built-in
+			// one: they may hold a separate module copy of showReset, so gate the countdown here.
+			// Inside the guard because `pi` is invalidated alongside ctx.
+			pi.events.emit("quota:changed", formatQuota(lastWins));
+		});
 	}
 
-	async function refresh(ctx: ExtensionContext, force = false) {
+	async function refresh(ctx: ExtensionContext, force = false, reload = false) {
 		if (!force && Date.now() - lastFetch < 60_000) return; // throttle turn_end pings
+		const startedAt = generation;
+		// Only the active model's provider. Guarded: refresh is fired from a timer via
+		// `void refresh(...)`, so a stale ctx here would surface as an unhandled rejection.
+		let provider: string | undefined;
+		if (!withLiveCtx(() => void (provider = ctx.model?.provider))) return;
 		lastFetch = Date.now();
-		// Only the active model's provider.
-		const provider = ctx.model?.provider;
 		const source =
 			provider === "anthropic"
-				? () => cached("cc", claudeWindows)
+				? () => cached("cc", claudeWindows, reload)
 				: provider === "openai-codex"
-					? () => cached("cx", codexWindows)
+					? () => cached("cx", codexWindows, reload)
 					: provider === "kimi-coding"
-						? () => cached("k3", kimiWindows)
+						? () => cached("k3", kimiWindows, reload)
 						: undefined;
 		if (!source) {
 			lastWins = [];
-			ctx.ui.setStatus("quota", undefined);
-			pi.events.emit("quota:changed", "");
+			withLiveCtx(() => {
+				ctx.ui.setStatus("quota", undefined);
+				pi.events.emit("quota:changed", "");
+			});
 			return;
 		}
 		const wins = await source().catch(() => [] as Win[]);
 		if (wins.length === 0) return; // offline/no auth: keep last shown
+		if (startedAt !== generation) return; // session was replaced while fetching
 		lastWins = wins;
 		renderQuota(ctx);
 	}
 
 	pi.on("session_start", async (_e, ctx) => {
+		generation++;
+		stopTimers();
 		void refresh(ctx, true);
-		clearInterval(timer);
-		clearInterval(countdownTimer);
 		timer = setInterval(() => void refresh(ctx, true), REFRESH_MS);
 		countdownTimer = setInterval(() => renderQuota(ctx), 60_000);
 	});
 
 	// Without this, a session_start timer outlives its ctx across newSession/fork/
 	// switchSession/reload (a fresh extension instance owns the next session) and
-	// crashes pi when it next fires against the now-stale ctx.
+	// crashes pi when it next fires against the now-stale ctx. This is the primary
+	// cleanup; withLiveCtx is the backstop for when it doesn't reach this closure.
 	pi.on("session_shutdown", () => {
-		clearInterval(timer);
-		clearInterval(countdownTimer);
-		timer = undefined;
-		countdownTimer = undefined;
+		generation++;
+		stopTimers();
 	});
 
 	pi.on("turn_end", async (_e, ctx) => void refresh(ctx));
 
 	pi.on("model_select", async (_e, ctx) => void refresh(ctx, true));
+
+	pi.registerCommand("quota", {
+		description: "Force-reload provider quota now (bypasses the cache TTL and 429 backoff)",
+		handler: async (_args, ctx) => {
+			await refresh(ctx, true, true);
+			ctx.ui.notify?.(
+				lastWins.length ? `Quota: ${formatQuota(lastWins, Date.now(), true)}` : "Quota unavailable for the current provider",
+				"info",
+			);
+		},
+	});
 
 	pi.registerCommand("reset", {
 		description: "Toggle quota reset countdown in the footer",

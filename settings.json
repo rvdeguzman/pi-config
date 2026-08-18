@@ -3,7 +3,6 @@
   "packages": [
     "npm:pi-claude-auth",
     "npm:pi-web-search",
-    "git:github.com/DietrichGebert/ponytail",
     "npm:@injaneity/pi-computer-use",
     "npm:pi-exa",
     "npm:pi-intercom",
