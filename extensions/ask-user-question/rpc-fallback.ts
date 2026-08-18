@@ -20,15 +20,9 @@
  * `ROW_INTENT_META.other.autoAppendOnMultiSelect`.
  */
 
-import { displayLabel, t } from "./state/i18n-bridge.js";
+import { LABELS_BY_KIND } from "./state/row-intent.js";
 import type { QuestionAnswer, QuestionData, QuestionnaireResult, QuestionParams } from "./tool/types.js";
 
-/**
- * Canonical-English fallbacks; resolved through `t()` at dialog time so the
- * live locale applies (top-level `const x = t(...)` would bake load-time
- * English in — see i18n-bridge.ts). The sentinel row label comes from
- * `displayLabel("other")` — same source as the TUI row.
- */
 const MULTI_SELECT_INSTRUCTIONS =
 	'Enter the numbers of all that apply, comma-separated (e.g. "1,3"), or type a custom answer as plain text.';
 const CUSTOM_ANSWER_TITLE = "Type your answer:";
@@ -107,7 +101,7 @@ async function askSingleSelect(
 	header: string,
 ): Promise<QuestionAnswer | undefined> {
 	const options = q.options.map(formatOptionLine);
-	options.push(`${q.options.length + 1}. ${displayLabel("other")}`);
+	options.push(`${q.options.length + 1}. ${LABELS_BY_KIND.other}`);
 	const chosen = await ui.select(`${header}${q.question}${buildPreviewBlock(q)}`, options);
 	if (chosen == null) return undefined;
 	const idx = parseIndex(chosen, options.length);
@@ -125,7 +119,7 @@ async function askSingleSelect(
 		};
 	}
 	// "Type something." sentinel → free-text follow-up.
-	const typed = await ui.input(`${header}${q.question}\n\n${t("rpc.custom_answer_title", CUSTOM_ANSWER_TITLE)}`, "");
+	const typed = await ui.input(`${header}${q.question}\n\n${CUSTOM_ANSWER_TITLE}`, "");
 	if (typed == null) return undefined;
 	return { questionIndex, question: q.question, kind: "custom", answer: typed };
 }
@@ -139,7 +133,7 @@ async function askMultiSelect(
 ): Promise<QuestionAnswer | undefined> {
 	const list = q.options.map(formatOptionLine).join("\n");
 	const value = await ui.input(
-		`${header}${q.question}\n\n${list}\n\n${t("rpc.multi_instructions", MULTI_SELECT_INSTRUCTIONS)}`,
+		`${header}${q.question}\n\n${list}\n\n${MULTI_SELECT_INSTRUCTIONS}`,
 		MULTI_SELECT_PLACEHOLDER,
 	);
 	if (value == null) return undefined;

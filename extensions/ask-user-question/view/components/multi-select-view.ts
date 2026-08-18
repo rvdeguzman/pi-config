@@ -1,13 +1,13 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { displayLabel } from "../../state/i18n-bridge.js";
+import { LABELS_BY_KIND } from "../../state/row-intent.js";
 import type { QuestionData } from "../../tool/types.js";
 import type { StatefulView } from "../stateful-view.js";
 import { renderInlineInputRow } from "./inline-input.js";
 
-const ACTIVE_POINTER = "❯ ";
+const ACTIVE_POINTER = "> ";
 const INACTIVE_POINTER = "  ";
-const CHECKED = "[✔]";
+const CHECKED = "[x]";
 const UNCHECKED = "[ ]";
 const NUMBER_SEPARATOR = ". ";
 const BOX_LABEL_GAP = " ";
@@ -62,7 +62,7 @@ export class MultiSelectView implements StatefulView<MultiSelectViewProps> {
 			rows: [],
 			other: { active: false, inputMode: false, inputBuffer: "", inputCursorOffset: undefined },
 			nextActive: false,
-			nextLabel: displayLabel("next"),
+			nextLabel: LABELS_BY_KIND.next,
 		};
 	}
 
@@ -155,7 +155,7 @@ export class MultiSelectView implements StatefulView<MultiSelectViewProps> {
 			});
 		}
 
-		return wrapTextWithAnsi(other.inputBuffer || displayLabel("other"), contentWidth).map((segment, index) => {
+		return wrapTextWithAnsi(other.inputBuffer || LABELS_BY_KIND.other, contentWidth).map((segment, index) => {
 			const line = `${index === 0 ? rowPrefix : continuationPrefix}${segment}`;
 			return other.active ? selectedText(line) : line;
 		});

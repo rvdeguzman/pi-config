@@ -65,7 +65,6 @@ Some parts of the dialog exist only under the right conditions:
 | Side-by-side preview | An option carries a `preview`, and terminal and pane are both ≥ 100 columns |
 | Preview pane at all | Single-select questions only |
 | Collapse shortcut | `collapseKey` is not `"off"` and the host exposes raw terminal input |
-| Localized chrome | `@juicesharp/rpiv-i18n` is installed |
 
 ## Loading and startup cost
 

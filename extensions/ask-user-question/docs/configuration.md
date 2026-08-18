@@ -112,9 +112,5 @@ tool, so changes take effect on the next Pi restart.
 | --- | --- |
 | `XDG_CONFIG_HOME` | Relocates the config directory, as described above. Must be absolute. |
 
-`LANG` and `LC_ALL` influence the dialog language, but they are read by
-[`@juicesharp/rpiv-i18n`](https://www.npmjs.com/package/@juicesharp/rpiv-i18n) rather than
-by this package — see [localization.md](./localization.md).
-
 No other environment variables are read. The package makes no model calls, so it needs no
 API keys or model settings of its own.

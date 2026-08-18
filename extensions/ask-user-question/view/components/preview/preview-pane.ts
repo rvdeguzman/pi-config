@@ -224,7 +224,7 @@ export class PreviewPane implements StatefulView<PreviewPaneProps>, Component {
 		const boxAlignedPad = Math.max(PREVIEW_PADDING_LEFT, colWidth - boxWidth);
 		return contentLines.map((line) => {
 			if (line === "") return "";
-			// A line wider than the box (a long-locale notes affordance) slides left to
+			// A line wider than the box slides left to
 			// stay fully visible; truncation engages only when the column itself runs out.
 			const pad = Math.max(PREVIEW_PADDING_LEFT, Math.min(boxAlignedPad, colWidth - visibleWidth(line)));
 			return `${" ".repeat(pad)}${truncateToWidth(line, colWidth - pad, "")}`;

@@ -1,9 +1,8 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { t } from "../../state/i18n-bridge.js";
 import type { StatefulView } from "../stateful-view.js";
 
-const ACTIVE_POINTER = "❯ ";
+const ACTIVE_POINTER = "> ";
 const INACTIVE_POINTER = "  ";
 const NUMBER_SEPARATOR = ". ";
 
@@ -23,7 +22,7 @@ export interface SubmitPickerProps {
 /**
  * Static 2-row picker rendered on the Submit Tab. Row 0 = "Submit answers", Row 1 = "Cancel".
  *
- * - Active pointer (❯) follows `props.rows[i].active` per tick.
+ * - Active pointer (>) follows `props.rows[i].active` per tick.
  * - Both rows render in normal style at all times — D1 (revised) allows partial submission,
  *   so Submit is never dimmed or visually marked as unselectable. The warning header in
  *   `buildSubmitContainer` is the sole signal of incompleteness.
@@ -53,7 +52,7 @@ export class SubmitPicker implements StatefulView<SubmitPickerProps> {
 	render(width: number): string[] {
 		const lines: string[] = [];
 		for (let i = 0; i < 2; i++) {
-			const text = i === 0 ? t("submit.label", SUBMIT_LABEL) : t("submit.cancel", CANCEL_LABEL);
+			const text = i === 0 ? SUBMIT_LABEL : CANCEL_LABEL;
 			const active = this.props.rows[i]?.active ?? false;
 			const pointer = active ? ACTIVE_POINTER : INACTIVE_POINTER;
 			const number = `${i + 1}${NUMBER_SEPARATOR}`;

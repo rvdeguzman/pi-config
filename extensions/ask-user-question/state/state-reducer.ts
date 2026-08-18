@@ -199,7 +199,7 @@ const confirmHandler: Handler<"confirm"> = (state, action, ctx) => {
 	const answers = new Map(state.answers);
 	answers.set(answer.questionIndex, answer);
 	// Custom free-text on a multi-select tab is mutually exclusive with checkbox selections:
-	// clear the checked set immediately so [✔] glyphs vanish on Enter. (A custom answer
+	// clear the checked set immediately so [x] marks vanish on Enter. (A custom answer
 	// carries no `selected` array, so syncMultiSelectFromAnswers keeps it empty on tab-back.)
 	const isCustomMulti = answer.kind === "custom" && ctx.questions[answer.questionIndex]?.multiSelect === true;
 	const customDraftsByTab =

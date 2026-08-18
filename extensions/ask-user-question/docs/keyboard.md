@@ -7,11 +7,11 @@ adapts to the size of your terminal.
 
 | Key | What it does | Where it applies |
 | --- | --- | --- |
-| `↑` / `↓` | Move between rows. Wraps at both ends. | Option list, Submit picker |
+| `Up` / `Down` | Move between rows. Wraps at both ends. | Option list, Submit picker |
 | `Enter` | Confirm the focused option, commit typed text, close notes, or activate the focused Submit-picker row. | Everywhere |
 | `Shift+Enter` | Insert a newline. | `Type something.` input, notes editor |
 | `Esc` | Cancel the whole questionnaire. | Everywhere except the notes editor, where it closes notes |
-| `Tab` / `Shift+Tab` | Next / previous tab, wrapping. `→` / `←` do the same. | Multi-question dialogs only |
+| `Tab` / `Shift+Tab` | Next / previous tab, wrapping. `Right` / `Left` do the same. | Multi-question dialogs only |
 | `Space` | Toggle the focused checkbox. | Multi-select questions |
 | `n` | Open the notes editor for the current question. | Every question tab |
 | `Ctrl+G` | Open Pi's configured external editor with the current custom-answer draft. | `Type something.` input |
@@ -51,8 +51,6 @@ clears it, while `Esc` remains the explicit way to cancel the questionnaire. Con
 it produces an answer of `kind: "custom"`.
 
 Both labels are reserved — the model cannot author an option that collides with them.
-Both localize with the rest of the UI chrome; the reserved-label check always compares
-against the canonical English strings.
 
 ## Notes
 
@@ -93,8 +91,8 @@ the dialog pane are at least 100 columns wide. Below that, the preview stacks un
 the options instead.
 
 When the dialog is taller than the terminal, the body scrolls between a sticky heading and
-a sticky footer, and an overflow indicator shows which direction is clipped: `↑` for
-content above, `↓` for content below, `↕` for both.
+a sticky footer, and an overflow indicator shows which direction is clipped: `^` for
+content above, `v` for content below, `^v` for both.
 
 The footer hint line adapts to context — it drops the notes hint and appends the
 `Shift+Enter` newline hint whenever a text editor has the keyboard, with `Ctrl+U` still at

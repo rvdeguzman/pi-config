@@ -9,7 +9,7 @@ import type { TabComponents } from "./tab-components.js";
 import { QuestionTabStrategy, SubmitTabStrategy, type TabContentStrategy } from "./tab-content-strategy.js";
 
 export const HINT_PART_ENTER = "Enter to select";
-export const HINT_PART_NAV = "↑/↓ to navigate";
+export const HINT_PART_NAV = "Up/Down to navigate";
 export const HINT_PART_NEW_LINE = "Shift+Enter for newline";
 export const HINT_PART_CLEAR = "Ctrl+U to clear";
 export const HINT_PART_TOGGLE = "Space to toggle";
@@ -29,19 +29,19 @@ export const HINT_PART_EXPAND = "Ctrl+] to expand";
  * prefix substring of the rendered line. On narrow terminals the collapse tail
  * clips with `…` (`OneLineClippedText`); the core is preserved.
  */
-export const HINT_SINGLE = [HINT_PART_ENTER, HINT_PART_NAV, HINT_PART_NOTES, HINT_PART_CANCEL].join(" · ");
+export const HINT_SINGLE = [HINT_PART_ENTER, HINT_PART_NAV, HINT_PART_NOTES, HINT_PART_CANCEL].join(" | ");
 export const HINT_MULTI = [HINT_PART_ENTER, HINT_PART_NAV, HINT_PART_NOTES, HINT_PART_TAB, HINT_PART_CANCEL].join(
-	" · ",
+	" | ",
 );
 /** Single-line footer shown by `QuestionnaireSession` when `state.collapsed === true`. Bypasses `buildHintText`. */
-export const COLLAPSED_HINT = [HINT_PART_EXPAND, HINT_PART_CANCEL].join(" · ");
+export const COLLAPSED_HINT = [HINT_PART_EXPAND, HINT_PART_CANCEL].join(" | ");
 export const REVIEW_HEADING = "Review your answers";
 export const READY_PROMPT = "Ready to submit your answers?";
-export const INCOMPLETE_WARNING_PREFIX = "⚠ Answer remaining questions before submitting:";
+export const INCOMPLETE_WARNING_PREFIX = "! Answer remaining questions before submitting:";
 
-const OVERFLOW_UP = "↑";
-const OVERFLOW_DOWN = "↓";
-const OVERFLOW_BOTH = "↕";
+const OVERFLOW_UP = "^";
+const OVERFLOW_DOWN = "v";
+const OVERFLOW_BOTH = "^v";
 
 export type DialogState = QuestionnaireState;
 
@@ -179,7 +179,7 @@ export class DialogView implements StatefulView<DialogProps> {
 		const hasUp = scrollStart > 0;
 		const hasDown = scrollStart + availableMiddle < middleRows;
 		if (hasUp && hasDown && scrollableMiddle.length === 1) {
-			// Single-row middle: combined ↕ avoids the prior collision where ↓ overwrote ↑.
+			// Single-row middle: combined ^v avoids the prior collision where v overwrote ^.
 			scrollableMiddle[0] = this.config.theme.fg("dim", OVERFLOW_BOTH);
 		} else {
 			if (hasUp && scrollableMiddle.length > 0) {

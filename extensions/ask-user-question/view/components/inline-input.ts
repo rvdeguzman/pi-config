@@ -12,7 +12,7 @@ export interface RenderInlineInputOptions {
 	buffer: string;
 	/** Cursor offset; `undefined` / out-of-range → end-of-buffer fallback. */
 	cursorOffset: number | undefined;
-	/** Prefix for the first emitted line (e.g. `❯ 4. `). */
+	/** Prefix for the first emitted line (e.g. `> 4. `). */
 	rowPrefix: string;
 	/** Prefix for continuation lines (whitespace of equal visible width). */
 	continuationPrefix: string;
