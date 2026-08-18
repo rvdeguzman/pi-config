@@ -612,7 +612,7 @@ export class Questionnaire {
 
 	private render(width: number) {
 		const w = Math.max(0, width);
-		const divider = "-".repeat(w);
+		const divider = "─".repeat(w);
 		const lines: string[] = [divider];
 		this.activeLine = 1;
 		if (this.hasReview) this.renderTabs(lines, w);

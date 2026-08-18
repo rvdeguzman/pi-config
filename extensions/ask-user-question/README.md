@@ -2,7 +2,7 @@
 
 A terminal-only Pi extension that gives the model an `ask_user_question` tool.
 
-It opens a plain ASCII questionnaire above Pi's normal editor and footer with:
+It opens a plain-text questionnaire above Pi's normal editor and footer with:
 
 - one to four tabbed questions;
 - letter-prefixed single-select options (`a.`, `b.`, ...);
@@ -11,7 +11,7 @@ It opens a plain ASCII questionnaire above Pi's normal editor and footer with:
 - multiline notes on each question; and
 - a final review and submit tab when several questions are asked.
 
-The questionnaire is bounded by full-width ASCII dividers and scrolls internally to keep the active row visible without covering the editor.
+The questionnaire is bounded by full-width `─` dividers and scrolls internally to keep the active row visible without covering the editor.
 
 ## Install
 

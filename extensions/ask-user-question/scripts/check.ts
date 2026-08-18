@@ -77,13 +77,17 @@ for (let width = 0; width <= 80; width++) {
 
 const initialLines = questionnaire.component.render(80).map(stripTerminalSequences);
 const initial = initialLines.join("\n");
-assert.equal(initialLines[0], "-".repeat(80));
-assert.equal(initialLines.at(-1), "-".repeat(80));
+assert.equal(initialLines[0], "\u2500".repeat(80));
+assert.equal(initialLines.at(-1), "\u2500".repeat(80));
 assert.match(initial, /\[Checks\]/);
 assert.match(initial, /> \[ \] Unit/);
 assert.match(initial, /  \[ \] Type something\./);
 assert.doesNotMatch(initial, /^\s*>?\s*(?:\d+\.|[a-z]\.)\s+\[[ x]\]/m, "multi-select rows use checkbox-only prefixes");
-assert.doesNotMatch(initial, /[^\x00-\x7f]/, "generated questionnaire chrome must be ASCII");
+assert.doesNotMatch(
+	initial.split("\n").filter((line) => !/^\u2500+$/.test(line)).join("\n"),
+	/[^\x00-\x7f]/,
+	"generated questionnaire chrome must be ASCII apart from the divider rule",
+);
 
 const single = makeQuestionnaire([questions[1]!]);
 const singleText = single.component.render(80).map(stripTerminalSequences).join("\n");
@@ -120,8 +124,8 @@ questionnaire.component.handleInput("<down>");
 questionnaire.component.handleInput("<down>");
 const shortQuestion = questionnaire.component.render(80).map(stripTerminalSequences);
 assert.ok(shortQuestion.length <= terminal.rows - 5);
-assert.equal(shortQuestion[0], "-".repeat(80));
-assert.equal(shortQuestion.at(-1), "-".repeat(80));
+assert.equal(shortQuestion[0], "─".repeat(80));
+assert.equal(shortQuestion.at(-1), "─".repeat(80));
 assert.ok(shortQuestion.some((line) => line.includes("> Next")), "viewport must retain the active row");
 questionnaire.component.handleInput("<enter>");
 terminal.rows = 40;
@@ -132,8 +136,8 @@ questionnaire.component.handleInput("<enter>");
 terminal.rows = 8;
 const shortReview = questionnaire.component.render(80).map(stripTerminalSequences);
 assert.ok(shortReview.some((line) => line.includes("> Submit")), "viewport must retain the submit row");
-assert.equal(shortReview[0], "-".repeat(80));
-assert.equal(shortReview.at(-1), "-".repeat(80));
+assert.equal(shortReview[0], "─".repeat(80));
+assert.equal(shortReview.at(-1), "─".repeat(80));
 questionnaire.component.handleInput("<enter>");
 terminal.rows = 40;
 
