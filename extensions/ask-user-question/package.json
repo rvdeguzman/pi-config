@@ -1,7 +1,7 @@
 {
 	"name": "@juicesharp/rpiv-ask-user-question",
-	"version": "2.6.1",
-	"description": "Pi extension. A structured questionnaire the model can put to you when it would otherwise guess, with typed options instead of free-form replies.",
+	"version": "3.0.0",
+	"description": "Minimal terminal questionnaire for Pi with tabs, multi-select, custom answers, and notes.",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
@@ -9,8 +9,7 @@
 	],
 	"type": "module",
 	"exports": {
-		".": "./index.ts",
-		"./events": "./events.ts"
+		".": "./index.ts"
 	},
 	"license": "MIT",
 	"author": "juicesharp",
@@ -30,50 +29,11 @@
 		"test": "make check"
 	},
 	"files": [
-		"ask-user-question.ts",
-		"rpc-fallback.ts",
-		"config.ts",
-		"events.ts",
 		"index.ts",
-		"reconcile.ts",
 		"LICENSE",
-		"README.md",
-		"state/build-questionnaire.ts",
-		"state/external-editor.ts",
-		"state/key-router.ts",
-		"state/questionnaire-session.ts",
-		"state/row-intent.ts",
-		"state/selectors/contract.ts",
-		"state/selectors/derivations.ts",
-		"state/selectors/focus.ts",
-		"state/selectors/projections.ts",
-		"state/state-reducer.ts",
-		"state/state.ts",
-		"tool/format-answer.ts",
-		"tool/response-envelope.ts",
-		"tool/sanitize.ts",
-		"tool/types.ts",
-		"tool/validate-questionnaire.ts",
-		"view/component-binding.ts",
-		"view/components/inline-input.ts",
-		"view/components/multi-select-view.ts",
-		"view/components/option-list-view.ts",
-		"view/components/preview/markdown-content-cache.ts",
-		"view/components/preview/preview-block-renderer.ts",
-		"view/components/preview/preview-box-renderer.ts",
-		"view/components/preview/preview-layout-decider.ts",
-		"view/components/preview/preview-pane.ts",
-		"view/components/submit-picker.ts",
-		"view/components/tab-bar.ts",
-		"view/components/wrapping-select.ts",
-		"view/dialog-builder.ts",
-		"view/props-adapter.ts",
-		"view/stateful-view.ts",
-		"view/tab-components.ts",
-		"view/tab-content-strategy.ts"
+		"README.md"
 	],
 	"pi": {
-		"image": "https://raw.githubusercontent.com/juicesharp/rpiv-mono/main/packages/rpiv-ask-user-question/docs/cover.png",
 		"extensions": [
 			"./index.ts"
 		]
@@ -83,7 +43,6 @@
 		"@earendil-works/pi-tui": "*"
 	},
 	"dependencies": {
-		"@juicesharp/rpiv-config": "^2.6.1",
 		"typebox": "^1.1.24"
 	}
 }
