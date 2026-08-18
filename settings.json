@@ -23,6 +23,8 @@
   ],
   "hideThinkingBlock": true,
   "theme": "dark",
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-5",
   "modelRoles": {
     "default": "openai-codex/gpt-5.6-sol:medium"
   }
