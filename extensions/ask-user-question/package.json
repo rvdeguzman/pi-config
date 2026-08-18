@@ -27,7 +27,7 @@
 		"access": "public"
 	},
 	"scripts": {
-		"test": "vitest run"
+		"test": "make check"
 	},
 	"files": [
 		"ask-user-question.ts",
@@ -55,6 +55,7 @@
 		"state/state.ts",
 		"tool/format-answer.ts",
 		"tool/response-envelope.ts",
+		"tool/sanitize.ts",
 		"tool/types.ts",
 		"tool/validate-questionnaire.ts",
 		"view/component-binding.ts",

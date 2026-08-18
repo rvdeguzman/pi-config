@@ -1,5 +1,5 @@
 import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, type Editor, Spacer } from "@earendil-works/pi-tui";
+import { type Component, Container, type Editor, Spacer, truncateToWidth } from "@earendil-works/pi-tui";
 import type { QuestionnaireState } from "../state/state.js";
 import type { QuestionData } from "../tool/types.js";
 import type { PreviewPaneProps } from "./components/preview/preview-pane.js";
@@ -118,13 +118,14 @@ export class DialogView implements StatefulView<DialogProps> {
 	invalidate(): void {}
 
 	render(width: number): string[] {
+		const clamp = (lines: string[]) => lines.map((line) => truncateToWidth(line, Math.max(0, width), ""));
 		const state = this.liveProps.state;
 		const onSubmit = this.config.isMulti && state.currentTab === this.config.questions.length;
 		const strategy = onSubmit && this.submitStrategy ? this.submitStrategy : this.questionStrategy;
 
-		// Cache heading rows (avoid double construction in render and container build).
+		// Cache heading components; their rendered height can exceed the component count when text wraps.
 		const headingRowCache = strategy.headingRows(state);
-		const headingCount = headingRowCache.length;
+		const headingCount = headingRowCache.reduce((rows, component) => rows + component.render(width).length, 0);
 
 		// Build container WITHOUT residual spacer — spacer handled below based on overflow.
 		const natural = this.buildContainerFromStrategy(strategy, headingRowCache).render(width);
@@ -148,7 +149,7 @@ export class DialogView implements StatefulView<DialogProps> {
 
 		if (natural.length + spacerRows <= termRows) {
 			// No overflow — add residual spacer rows after footer.
-			return spacerRows > 0 ? [...natural, ...Array<string>(spacerRows).fill("")] : natural;
+			return clamp(spacerRows > 0 ? [...natural, ...Array<string>(spacerRows).fill("")] : natural);
 		}
 
 		// OVERFLOW — apply 3-region partition with scroll-to-focus.
@@ -156,7 +157,7 @@ export class DialogView implements StatefulView<DialogProps> {
 		if (availableMiddle === 0) {
 			// Terminal too small for any middle content — show just chrome.
 			const chromeOnly = [...natural.slice(0, topFixed), ...natural.slice(natural.length - bottomFixed)];
-			return chromeOnly.length > termRows ? chromeOnly.slice(0, termRows) : chromeOnly;
+			return clamp(chromeOnly.length > termRows ? chromeOnly.slice(0, termRows) : chromeOnly);
 		}
 
 		const bodyRange = strategy.focusedItemRowRange(width, state);
@@ -197,7 +198,7 @@ export class DialogView implements StatefulView<DialogProps> {
 		];
 		// Safety: never exceed terminal rows (covers the availableMiddle === 0 case
 		// where topFixed + bottomFixed > termRows).
-		return result.length > termRows ? result.slice(0, termRows) : result;
+		return clamp(result.length > termRows ? result.slice(0, termRows) : result);
 	}
 
 	private buildContainerFromStrategy(strategy: TabContentStrategy, headingRowCache: Component[]): Container {

@@ -155,7 +155,7 @@ export interface SubmitTabStrategyConfig {
 }
 
 export class SubmitTabStrategy implements TabContentStrategy {
-	/** Spacer(1) + Text(prompt, 1) + Spacer(1) + submitPicker(2) = 5 rendered rows. Fallback path lands at 5 via 2 trailing Spacer(1)s. */
+	/** Spacer(1) + OneLineClippedText(prompt, 1) + Spacer(1) + submitPicker(2) = 5 rendered rows. Fallback path lands at 5 via 2 trailing Spacer(1)s. */
 	readonly footerRowCount = 5;
 
 	constructor(private readonly config: SubmitTabStrategyConfig) {}
@@ -206,7 +206,7 @@ export class SubmitTabStrategy implements TabContentStrategy {
 			missing.length === 0
 				? this.config.theme.fg("muted", READY_PROMPT)
 				: this.config.theme.fg("warning", `${INCOMPLETE_WARNING_PREFIX} ${missing.join(", ")}`);
-		const out: Component[] = [new Spacer(1), new Text(promptText, 1, 0), new Spacer(1)];
+		const out: Component[] = [new Spacer(1), new OneLineClippedText(promptText, 1), new Spacer(1)];
 		if (this.config.submitPicker) {
 			out.push(this.config.submitPicker);
 		} else {

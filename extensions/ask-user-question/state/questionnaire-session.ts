@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Editor, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, type Editor, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { sanitizeBlock } from "../tool/sanitize.js";
 import type { QuestionData, QuestionnaireResult, QuestionParams } from "../tool/types.js";
 import type { WrappingSelectItem } from "../view/components/wrapping-select.js";
 import { COLLAPSED_HINT } from "../view/dialog-builder.js";
@@ -106,7 +107,9 @@ export class QuestionnaireSession {
 		// the bottom-anchored overlay from full-height to one row and the transcript
 		// behind it becomes readable (#47). The overlay stays focused and in the
 		// stack, so Ctrl+] still routes here to expand.
-		const collapsedRender = (_width: number): string[] => [theme.fg("dim", ` ${COLLAPSED_HINT} `)];
+		const collapsedRender = (width: number): string[] => [
+			truncateToWidth(theme.fg("dim", ` ${COLLAPSED_HINT} `), Math.max(0, width), ""),
+		];
 
 		this.component = {
 			render: (width) => (this.state.collapsed ? collapsedRender(width) : built.render(width)),
@@ -156,7 +159,7 @@ export class QuestionnaireSession {
 				void this.editInput(effect.value).then(
 					(value) => {
 						this.inputEditorOpen = false;
-						if (value !== undefined) this.commit({ kind: "input_replace", value });
+						if (value !== undefined) this.commit({ kind: "input_replace", value: sanitizeBlock(value) });
 					},
 					() => {
 						// The host callback reports launch errors; retain the draft and restore input handling.

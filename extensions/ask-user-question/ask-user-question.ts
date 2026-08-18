@@ -12,6 +12,7 @@ import {
 import { hasDialogUI, runRpcQuestionnaire } from "./rpc-fallback.js";
 import { LABELS_BY_KIND, sentinelsToAppend } from "./state/row-intent.js";
 import { buildQuestionnaireResponse, buildToolResult } from "./tool/response-envelope.js";
+import { sanitizeBlock, sanitizeLine } from "./tool/sanitize.js";
 import {
 	MAX_OPTIONS,
 	MAX_QUESTIONS,
@@ -180,8 +181,22 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 				});
 			}
 
+			const sanitized: QuestionParams = {
+				questions: typed.questions.map((question) => ({
+					...question,
+					question: sanitizeLine(question.question),
+					header: sanitizeLine(question.header),
+					options: question.options.map((option) => ({
+						...option,
+						label: sanitizeLine(option.label),
+						description: sanitizeLine(option.description),
+						...(option.preview === undefined ? {} : { preview: sanitizeBlock(option.preview) }),
+					})),
+				})),
+			};
+
 			// Emit event for external listeners (e.g., notification plugins)
-			emitAskUserPromptEvent(pi, typed);
+			emitAskUserPromptEvent(pi, sanitized);
 
 			// RPC hosts (VSCode pendant, ACP clients like Zed/Paseo — issue #78):
 			// ui.custom() cannot render there, but the select/input dialog
@@ -193,13 +208,13 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 				emitAskUserBlockedEvent(pi, true);
 				try {
 					emitTerminalAttention();
-					return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed), typed);
+					return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, sanitized), sanitized);
 				} finally {
 					emitAskUserBlockedEvent(pi, false);
 				}
 			}
 
-			const itemsByTab: WrappingSelectItem[][] = typed.questions.map((q) => buildItemsForQuestion(q));
+			const itemsByTab: WrappingSelectItem[][] = sanitized.questions.map((q) => buildItemsForQuestion(q));
 
 			// Lazy — QuestionnaireSession pulls the ~560ms view/TUI render graph;
 			// load it only when the tool runs, not at extension registration.
@@ -258,7 +273,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 						const session = new QuestionnaireSession({
 							tui,
 							theme,
-							params: typed,
+							params: sanitized,
 							itemsByTab,
 							done,
 							keybindings,
@@ -307,12 +322,12 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 				// model the user never saw the questions.
 				if (result === undefined) {
 					if (hasDialogUI(ctx.ui)) {
-						return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed), typed);
+						return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, sanitized), sanitized);
 					}
 					return buildToolResult(ERROR_NO_CUSTOM_UI, { answers: [], cancelled: true, error: "no_custom_ui" });
 				}
 
-				return buildQuestionnaireResponse(result, typed);
+				return buildQuestionnaireResponse(result, sanitized);
 			} finally {
 				removeOverlayInputListener?.();
 				emitAskUserBlockedEvent(pi, false);
