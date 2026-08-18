@@ -28,7 +28,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
-import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { type ModelRegistry, modelCandidates, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
@@ -1143,12 +1143,18 @@ export default function (pi: ExtensionAPI) {
       return `- ${name}: ${firstSentence(cfg?.description ?? name)} (Tools: ${formatToolsSuffix(cfg)})`;
     }).join("\n");
 
-  /** Derive a short model label from a model string. */
+  /**
+   * Derive a short model label from a model string. A fallback list labels its
+   * primary and counts the rest — the whole list would crowd out the agent
+   * description it sits next to.
+   */
   function getModelLabelFromConfig(model: string): string {
+    const [primary = model, ...fallbacks] = modelCandidates(model);
     // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
-    const name = model.includes("/") ? model.split("/").pop()! : model;
+    const name = primary.includes("/") ? primary.split("/").pop()! : primary;
     // Strip trailing date suffix (e.g. "claude-haiku-4-5-20251001" → "claude-haiku-4-5")
-    return name.replace(/-\d{8}$/, "");
+    const label = name.replace(/-\d{8}$/, "");
+    return fallbacks.length > 0 ? `${label} +${fallbacks.length} fallback` : label;
   }
 
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
@@ -2077,13 +2083,16 @@ Terse command-style prompts produce shallow, generic work.
     const resolved = resolveModel(cfg.model, registry);
     // Configured but unresolvable: the runtime silently falls back to the parent
     // model, so flag it (and the fallback) rather than hiding the config.
+    // Every candidate failed (a single pin is a one-entry list).
     if (typeof resolved === "string") return `${label} (unavailable, fallback: inherit)`;
     // Surface what it actually resolved to when that differs from the config —
     // e.g. a provider fallback or a looser version pin. Cosmetic separator/date
     // differences are normalized away so an effectively-identical match stays quiet.
+    // Compared against the primary: for a fallback list, landing on a later
+    // candidate is exactly the case worth showing.
     const resolvedFull = `${resolved.provider}/${resolved.id}`;
     const norm = (s: string) => s.toLowerCase().replace(/\./g, "-").replace(/-\d{8}$/, "");
-    if (norm(cfg.model) === norm(resolvedFull)) return label;
+    if (norm(modelCandidates(cfg.model)[0] ?? cfg.model) === norm(resolvedFull)) return label;
     return `${label} (→ ${resolvedFull.replace(/-\d{8}$/, "")})`;
   }
 
@@ -2395,7 +2404,7 @@ The file format is a markdown file with YAML frontmatter and a system prompt bod
 description: <one-line description shown in UI>
 color: <optional agent name badge color: red, blue, green, yellow, purple, orange, pink, cyan, an Agency Agents alias, or quoted "#RRGGBB">
 tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "none" for no tools. Omit for all tools>
-model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". Omit to inherit parent model>
+model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". A comma-separated list or YAML array is a fallback chain, tried in order. Omit to inherit parent model>
 thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inherit>
 max_turns: <optional max agentic turns. 0 or omit for unlimited (default)>
 prompt_mode: <"replace" (body IS the full system prompt) or "append" (body is appended to default prompt). Default: replace>

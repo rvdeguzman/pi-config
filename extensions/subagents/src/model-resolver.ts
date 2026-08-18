@@ -15,11 +15,42 @@ export interface ModelRegistry {
 }
 
 /**
- * Resolve a model string to a Model instance.
- * Tries exact match first ("provider/modelId"), then fuzzy match against all available models.
- * Returns the Model on success, or an error message string on failure.
+ * Split a `model` value into its candidates. A comma-separated value is a
+ * fallback list, tried left to right — the same spelling an agent file's YAML
+ * array (`model: [a, b]`) collapses to when it is loaded.
+ */
+export function modelCandidates(input: string): string[] {
+  return input.split(",").map(s => s.trim()).filter(Boolean);
+}
+
+/**
+ * Resolve a model string to a Model instance, honouring a fallback list:
+ * candidates are tried in order and the first that resolves wins. Returns the
+ * Model on success, or an error message string when none resolve — callers
+ * treat that as "inherit the parent model" for a config pin, or as an error for
+ * a caller-supplied one.
  */
 export function resolveModel(
+  input: string,
+  registry: ModelRegistry,
+): any | string {
+  const candidates = modelCandidates(input);
+  let lastError = `Model not found: "${input}".`;
+  for (const candidate of candidates) {
+    const resolved = resolveOne(candidate, registry);
+    if (typeof resolved !== "string") return resolved;
+    lastError = resolved;
+  }
+  return candidates.length > 1
+    ? `No model resolved from the fallback list "${input}".\n\n${lastError}`
+    : lastError;
+}
+
+/**
+ * Resolve one candidate.
+ * Tries exact match first ("provider/modelId"), then fuzzy match against all available models.
+ */
+function resolveOne(
   input: string,
   registry: ModelRegistry,
 ): any | string {
@@ -87,7 +118,7 @@ export function resolveModel(
   // named provider is preferred when present; this only kicks in when it isn't,
   // so the same model from another provider beats falling back to "inherit".
   if (slashIdx !== -1) {
-    const bare = resolveModel(input.slice(slashIdx + 1), registry);
+    const bare = resolveOne(input.slice(slashIdx + 1), registry);
     if (typeof bare !== "string") return bare;
   }
 

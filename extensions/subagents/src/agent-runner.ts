@@ -22,6 +22,7 @@ import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
+import { modelCandidates } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
@@ -336,29 +337,30 @@ export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
 /**
  * Try to find the right model for an agent type.
  * Priority: explicit option > config.model > parent model.
+ *
+ * `configModel` may be a comma-separated fallback list, tried left to right;
+ * the parent model is the last resort when no candidate is found or available.
  */
 export function resolveDefaultModel(
   parentModel: Model<any> | undefined,
   registry: { find(provider: string, modelId: string): Model<any> | undefined; getAvailable?(): Model<any>[] },
   configModel?: string,
 ): Model<any> | undefined {
-  if (configModel) {
-    const slashIdx = configModel.indexOf("/");
-    if (slashIdx !== -1) {
-      const provider = configModel.slice(0, slashIdx);
-      const modelId = configModel.slice(slashIdx + 1);
+  // Build a set of available model keys for fast lookup
+  const available = registry.getAvailable?.();
+  const availableKeys = available
+    ? new Set(available.map((m: any) => `${m.provider}/${m.id}`))
+    : undefined;
 
-      // Build a set of available model keys for fast lookup
-      const available = registry.getAvailable?.();
-      const availableKeys = available
-        ? new Set(available.map((m: any) => `${m.provider}/${m.id}`))
-        : undefined;
-      const isAvailable = (p: string, id: string) =>
-        !availableKeys || availableKeys.has(`${p}/${id}`);
+  for (const candidate of configModel ? modelCandidates(configModel) : []) {
+    const slashIdx = candidate.indexOf("/");
+    if (slashIdx === -1) continue;
+    const provider = candidate.slice(0, slashIdx);
+    const modelId = candidate.slice(slashIdx + 1);
+    if (availableKeys && !availableKeys.has(`${provider}/${modelId}`)) continue;
 
-      const found = registry.find(provider, modelId);
-      if (found && isAvailable(provider, modelId)) return found;
-    }
+    const found = registry.find(provider, modelId);
+    if (found) return found;
   }
 
   return parentModel;

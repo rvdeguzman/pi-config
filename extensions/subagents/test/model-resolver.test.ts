@@ -194,11 +194,11 @@ describe("resolveModel", () => {
       expect(result).toContain("openai/gpt-4o");
     });
 
-    it("empty string matches a model (multi-part vacuous truth)", () => {
-      // Empty string splits to empty parts; every() on empty array is true
-      // This is fine — callers guard against empty input
+    it("empty string resolves nothing", () => {
+      // Empty input has no candidates, so there is nothing to match — it used to
+      // fuzzy-match vacuously and hand back an arbitrary model.
       const result = resolveModel("", makeRegistry());
-      expect(typeof result).toBe("object");
+      expect(typeof result).toBe("string");
     });
   });
 
@@ -246,6 +246,26 @@ describe("resolveModel", () => {
     it("'4-6' picks the 4.6 model", () => {
       const result = resolveModel("4-6", makeRegistry(SIMILAR_MODELS));
       expect(result).toEqual(SIMILAR_MODELS[0]);
+    });
+  });
+
+  describe("fallback list", () => {
+    it("uses the primary when it resolves", () => {
+      const result = resolveModel("anthropic/claude-opus-4-6, openai/gpt-4o", makeRegistry());
+      expect(result).toEqual(MODELS[0]);
+    });
+
+    it("falls through to the next candidate when the primary is unavailable", () => {
+      // Only gpt-4o has auth configured, so the opus pin can't run.
+      const registry = makeRegistry(MODELS, [MODELS[3]]);
+      const result = resolveModel("anthropic/claude-opus-4-6, openai/gpt-4o", registry);
+      expect(result).toEqual(MODELS[3]);
+    });
+
+    it("reports failure naming the whole list when no candidate resolves", () => {
+      const result = resolveModel("anthropic/nope, openai/also-nope", makeRegistry([]));
+      expect(typeof result).toBe("string");
+      expect(result).toContain("anthropic/nope, openai/also-nope");
     });
   });
 

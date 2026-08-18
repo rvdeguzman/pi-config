@@ -118,7 +118,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       extensions: inheritField(fm.extensions ?? fm.inherit_extensions),
       excludeExtensions: csvListOptional(fm.exclude_extensions),
       skills: inheritField(fm.skills ?? fm.inherit_skills),
-      model: str(fm.model),
+      model: modelField(fm.model),
       thinking: str(fm.thinking) as ThinkingLevel | undefined,
       maxTurns: nonNegativeInt(fm.max_turns),
       persistSession: fm.persist_session != null ? fm.persist_session === true : undefined,
@@ -196,6 +196,19 @@ function warnIfNew(message: string): void {
 /** Extract a string or undefined. */
 function str(val: unknown): string | undefined {
   return typeof val === "string" ? val : undefined;
+}
+
+/**
+ * Parse the `model` field: one entry, or a fallback list as a YAML array
+ * (`model: [a, b]`) or CSV (`model: a, b`). Stored as CSV and tried left to
+ * right at spawn time; when nothing resolves the agent inherits the parent
+ * model, exactly as an unresolvable single pin does.
+ */
+function modelField(val: unknown): string | undefined {
+  const items = Array.isArray(val)
+    ? val.map(v => String(v).trim()).filter(Boolean)
+    : parseCsvField(val);
+  return items && items.length > 0 ? items.join(",") : undefined;
 }
 
 /** Extract a non-negative integer or undefined. 0 means unlimited for max_turns. */

@@ -169,6 +169,21 @@ Just a prompt.`);
     expect(agent.systemPrompt).toBe("Just a prompt.");
   });
 
+  it("parses a model fallback list from a YAML array or CSV, both as CSV", () => {
+    writeAgent("yaml-array", `---
+model: [anthropic/claude-opus-4-6, openai/gpt-4o]
+---
+A.`);
+    writeAgent("csv", `---
+model: anthropic/claude-opus-4-6, openai/gpt-4o
+---
+B.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("yaml-array")?.model).toBe("anthropic/claude-opus-4-6,openai/gpt-4o");
+    expect(result.get("csv")?.model).toBe("anthropic/claude-opus-4-6,openai/gpt-4o");
+  });
+
   it("uses sensible defaults when no frontmatter at all", () => {
     writeAgent("bare", "Just a system prompt, no frontmatter.");
 
