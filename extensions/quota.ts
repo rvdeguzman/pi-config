@@ -12,7 +12,7 @@ const REFRESH_MS = 5 * 60 * 1000;
 // File cache shared across pi instances so N open sessions don't each ping.
 const CACHE_PATH = join(homedir(), ".pi/agent/quota-cache.json");
 const CACHE_VERSION = 2;
-const TTL: Record<string, number> = { cc: 15 * 60 * 1000, cx: 5 * 60 * 1000 };
+const TTL: Record<string, number> = { cc: 15 * 60 * 1000, cx: 5 * 60 * 1000, k3: 5 * 60 * 1000 };
 
 export type Win = { label: string; pct: number; resetAt?: number };
 type Cache = Record<string, { at: number; wins: Win[]; version?: number; backoffUntil?: number }>;
@@ -116,6 +116,25 @@ async function claudeWindows(): Promise<Win[]> {
 			resetAt: u.seven_day.resets_at ? Date.parse(u.seven_day.resets_at) : undefined,
 		});
 	return wins;
+}
+
+async function kimiWindows(): Promise<Win[]> {
+	const a = auth("kimi-coding");
+	if (!a) return [];
+	const u = await getJson("https://api.kimi.com/coding/v1/usages", {
+		Authorization: `Bearer ${a.access}`,
+		"User-Agent": "pi-quota",
+	});
+	const win = (label: string, d: any): Win | undefined => {
+		const limit = Number(d?.limit);
+		if (!limit) return undefined;
+		const used = d?.used != null ? Number(d.used) : d?.remaining != null ? limit - Number(d.remaining) : undefined;
+		if (used == null) return undefined;
+		return { label, pct: (used / limit) * 100, resetAt: d?.resetTime ? Date.parse(d.resetTime) : undefined };
+	};
+	// ponytail: 300min = 5h session window; falls back to first window if Kimi changes duration
+	const fiveH = u?.limits?.find((l: any) => l?.window?.duration === 300)?.detail ?? u?.limits?.[0]?.detail;
+	return [win("5h", fiveH), win("wk", u?.usage)].filter((w): w is Win => !!w);
 }
 
 function codexLabel(seconds?: number): string {
