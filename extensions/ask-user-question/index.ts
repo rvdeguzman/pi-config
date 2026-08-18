@@ -3,8 +3,11 @@ import {
 	CURSOR_MARKER,
 	Editor,
 	type EditorTheme,
+	isKeyRelease,
+	isKeyRepeat,
 	Key,
 	matchesKey,
+	type OverlayHandle,
 	Text,
 	truncateToWidth,
 	type TUI,
@@ -66,7 +69,7 @@ export type QuestionParams = Static<typeof QuestionParamsSchema>;
 export interface QuestionAnswer {
 	questionIndex: number;
 	question: string;
-	kind: "option" | "custom" | "multi";
+	kind: "option" | "custom" | "multi" | "notes";
 	answer: string | null;
 	selected?: string[];
 	notes?: string;
@@ -157,18 +160,27 @@ export function validateQuestionnaire(params: QuestionParams) {
 }
 
 function formatAnswer(answer: QuestionAnswer) {
+	if (answer.kind === "notes") return "(unanswered)";
 	if (answer.kind === "multi") return answer.selected?.length ? answer.selected.join(", ") : "(no input)";
 	return answer.answer || "(no input)";
 }
 
 export function buildQuestionnaireResponse(result: QuestionnaireResult) {
-	if (result.cancelled) return toolResult("User declined to answer questions", result);
+	if (result.cancelled) {
+		const notes = result.answers
+			.filter((answer) => answer.notes)
+			.map((answer) => `"${answer.question}"${answer.kind === "notes" ? " has no committed answer." : ""} user notes: ${answer.notes}.`);
+		return toolResult(`User declined to answer questions${notes.length ? ` Saved context: ${notes.join(" ")}` : ""}`, result);
+	}
 	const answers = result.answers.map((answer) => {
+		if (answer.kind === "notes") {
+			return `"${answer.question}" has no committed answer. user notes: ${answer.notes}.`;
+		}
 		const note = answer.notes ? `. user notes: ${answer.notes}` : "";
 		return `"${answer.question}"="${formatAnswer(answer)}"${note}.`;
 	});
 	return toolResult(
-		`User has answered your questions: ${answers.join(" ")} You can now continue with the user's answers in mind.`,
+		`User provided the following questionnaire context: ${answers.join(" ")} You can now continue with this context in mind.`,
 		result,
 	);
 }
@@ -207,6 +219,74 @@ function appendWrapped(lines: string[], prefix: string, text: string, width: num
 	}
 }
 
+const COLLAPSE_KEY = Key.ctrl("]");
+const RESERVED_EDITOR_ROWS = 5; // Widget spacer + Pi editor minimum + minimal footer.
+
+function isCollapseKey(data: string) {
+	return matchesKey(data, COLLAPSE_KEY);
+}
+
+interface CollapsibleOverlayHandle {
+	setHidden(hidden: boolean): void;
+	isHidden(): boolean;
+	isFocused(): boolean;
+	focus(): void;
+}
+
+/** Coordinates the invisible input controller and the above-editor widget. */
+export class QuestionnaireCollapseController {
+	private handle: CollapsibleOverlayHandle | undefined;
+
+	constructor(private readonly setWidgetVisible: (visible: boolean) => void) {}
+
+	setHandle(handle: CollapsibleOverlayHandle) {
+		this.handle = handle;
+	}
+
+	toggle() {
+		const handle = this.handle;
+		if (!handle) return;
+		const hide = !handle.isHidden();
+		this.setWidgetVisible(!hide);
+		handle.setHidden(hide);
+		if (!hide) handle.focus();
+	}
+
+	handleTerminalInput(data: string) {
+		const handle = this.handle;
+		if (!handle || (!handle.isHidden() && !handle.isFocused()) || !isCollapseKey(data)) return undefined;
+		if (!isKeyRelease(data) && !isKeyRepeat(data)) this.toggle();
+		return { consume: true };
+	}
+
+	dispose() {
+		this.setWidgetVisible(false);
+	}
+}
+
+/** Invisible focused overlay that forwards input to the above-editor questionnaire. */
+export class QuestionnaireInputController {
+	readonly component = {
+		wantsKeyRelease: true,
+		render: (_width: number) => [] as string[],
+		invalidate: () => this.questionnaire.component.invalidate(),
+		handleInput: (data: string) => {
+			if (isCollapseKey(data)) {
+				if (!isKeyRelease(data) && !isKeyRepeat(data)) this.collapse.toggle();
+				return;
+			}
+			if (isKeyRelease(data)) return;
+			this.questionnaire.component.handleInput(data);
+		},
+		dispose: () => this.questionnaire.abort(),
+	};
+
+	constructor(
+		private readonly questionnaire: Questionnaire,
+		private readonly collapse: QuestionnaireCollapseController,
+	) {}
+}
+
 /** Minimal terminal-only questionnaire. All generated chrome is plain ASCII. */
 export class Questionnaire {
 	private currentTab = 0;
@@ -222,6 +302,7 @@ export class Questionnaire {
 	private readonly notesEditor: Editor;
 	private activeLine = 0;
 	private inlineWidth = 80;
+	private finished = false;
 
 	constructor(private readonly config: QuestionnaireConfig) {
 		this.cursors = config.questions.map(() => 0);
@@ -416,10 +497,19 @@ export class Questionnaire {
 		this.move(delta);
 	}
 
+	private activateCustomInput() {
+		const question = this.question;
+		if (!question || this.cursor !== question.options.length) return;
+		this.inputMode = true;
+		this.inlineEditor.setText(this.customDrafts.get(this.currentTab) ?? "");
+		this.inlineEditor.focused = true;
+	}
+
 	private move(delta: number) {
 		if (!this.question) return;
 		const count = this.itemCount(this.question);
 		this.cursor = ((this.cursor + delta) % count + count) % count;
+		this.activateCustomInput();
 		this.refresh();
 	}
 
@@ -444,9 +534,7 @@ export class Questionnaire {
 		const question = this.question;
 		if (!question) return;
 		if (this.cursor === question.options.length) {
-			this.inputMode = true;
-			this.inlineEditor.setText(this.customDrafts.get(this.currentTab) ?? "");
-			this.inlineEditor.focused = true;
+			this.activateCustomInput();
 			this.refresh();
 			return;
 		}
@@ -490,42 +578,69 @@ export class Questionnaire {
 	private switchTab(index: number) {
 		const total = this.config.questions.length + 1;
 		this.currentTab = ((index % total) + total) % total;
+		this.activateCustomInput();
 		this.refresh();
 	}
 
 	private orderedAnswers() {
-		return this.config.questions.flatMap((_, index) => {
+		return this.config.questions.flatMap((question, index) => {
 			const answer = this.answers.get(index);
-			if (!answer) return [];
 			const notes = this.notes.get(index);
-			return [{ ...answer, ...(notes ? { notes } : {}) }];
+			if (answer) return [{ ...answer, ...(notes ? { notes } : {}) }];
+			if (!notes) return [];
+			return [{
+				questionIndex: index,
+				question: question.question,
+				kind: "notes" as const,
+				answer: null,
+				notes,
+			}];
 		});
 	}
 
 	private finish(cancelled: boolean) {
+		if (this.finished) return;
+		this.finished = true;
+		this.inlineEditor.focused = false;
+		this.notesEditor.focused = false;
 		this.config.done({ answers: this.orderedAnswers(), cancelled });
+	}
+
+	abort() {
+		this.finish(true);
 	}
 
 	private render(width: number) {
 		const w = Math.max(0, width);
-		const lines: string[] = [];
-		this.activeLine = 0;
+		const divider = "-".repeat(w);
+		const lines: string[] = [divider];
+		this.activeLine = 1;
 		if (this.hasReview) this.renderTabs(lines, w);
 		if (this.currentTab === this.config.questions.length) this.renderReview(lines, w);
 		else this.renderQuestion(lines, w);
+		lines.push(divider);
 		return this.fitHeight(lines.map((line) => truncateToWidth(line, w, "")));
 	}
 
 	private fitHeight(lines: string[]) {
-		const maxRows = Math.max(1, this.config.tui.terminal.rows);
+		const maxRows = Math.max(0, this.config.tui.terminal.rows - RESERVED_EDITOR_ROWS);
+		if (maxRows === 0) return [];
 		if (lines.length <= maxRows) return lines;
-		const pinTabs = this.hasReview && maxRows >= 3;
-		const pinned = pinTabs ? lines.slice(0, 2) : [];
-		const body = pinTabs ? lines.slice(2) : lines;
-		const available = Math.max(1, maxRows - pinned.length);
-		const anchor = Math.max(0, this.activeLine - (pinTabs ? 2 : 0));
-		const start = Math.max(0, Math.min(anchor - Math.floor(available / 2), body.length - available));
-		return [...pinned, ...body.slice(start, start + available)].slice(0, maxRows);
+		if (maxRows === 1) return [lines[lines.length - 1]!];
+		const top = lines[0]!;
+		const bottom = lines[lines.length - 1]!;
+		const body = lines.slice(1, -1);
+		const available = maxRows - 2;
+		if (available === 0) return [top, bottom];
+
+		const pinTabs = this.hasReview && available >= 3;
+		const pinned = pinTabs ? body.slice(0, 2) : [];
+		const scrollBody = pinTabs ? body.slice(2) : body;
+		const scrollRows = Math.max(1, available - pinned.length);
+		const bodyAnchor = Math.max(0, this.activeLine - 1);
+		const anchor = Math.max(0, bodyAnchor - (pinTabs ? 2 : 0));
+		const start = Math.max(0, Math.min(anchor - Math.floor(scrollRows / 2), scrollBody.length - scrollRows));
+		return [top, ...pinned, ...scrollBody.slice(start, start + scrollRows), bottom].slice(0, maxRows);
 	}
 
 	private renderTabs(lines: string[], width: number) {
@@ -548,11 +663,11 @@ export class Questionnaire {
 		for (let index = 0; index < question.options.length; index++) {
 			const option = question.options[index]!;
 			const active = !this.notesMode && !this.inputMode && this.cursor === index;
-			const selected = question.multiSelect
-				? this.checks[this.currentTab]!.has(index)
-				: this.answers.get(this.currentTab)?.kind === "option" && this.answers.get(this.currentTab)?.answer === option.label;
-			const mark = `[${selected ? "x" : " "}]`;
-			const prefix = `${active ? ">" : " "} ${index + 1}. ${mark} `;
+			const selected = this.checks[this.currentTab]!.has(index);
+			const choicePrefix = question.multiSelect
+				? `[${selected ? "x" : " "}] `
+				: `${String.fromCharCode("a".charCodeAt(0) + index)}. `;
+			const prefix = `${active ? ">" : " "} ${choicePrefix}`;
 			if (active) this.activeLine = lines.length;
 			appendWrapped(lines, prefix, active ? this.config.theme.fg("accent", option.label) : option.label, width);
 			appendWrapped(lines, " ".repeat(visibleWidth(prefix)), this.config.theme.fg("muted", option.description), width);
@@ -561,7 +676,10 @@ export class Questionnaire {
 		const customIndex = question.options.length;
 		const customActive = this.cursor === customIndex;
 		const customSelected = this.answers.get(this.currentTab)?.kind === "custom";
-		const customPrefix = `${customActive ? ">" : " "} ${customIndex + 1}. [${customSelected ? "x" : " "}] `;
+		const customChoicePrefix = question.multiSelect
+			? `[${customSelected ? "x" : " "}] `
+			: `${String.fromCharCode("a".charCodeAt(0) + customIndex)}. `;
+		const customPrefix = `${customActive ? ">" : " "} ${customChoicePrefix}`;
 		if (customActive) this.activeLine = lines.length;
 		if (this.inputMode) {
 			// Editor reserves one cursor column; add it back so its hidden layout matches ours.
@@ -652,7 +770,7 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 		promptGuidelines: DEFAULT_PROMPT_GUIDELINES,
 		parameters: QuestionParamsSchema,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			if (!ctx.hasUI || ctx.mode !== "tui") {
 				return toolResult("Error: UI not available", { answers: [], cancelled: true, error: "no_ui" });
 			}
@@ -666,32 +784,69 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 				});
 			}
 
-			const result = await ctx.ui.custom<QuestionnaireResult>(
-				(tui, theme, keybindings, done) => new Questionnaire({
-					tui,
-					theme,
-					keybindings,
-					questions: input.questions,
-					done,
-				}).component,
-				{
-					overlay: true,
-					overlayOptions: {
-						anchor: "bottom-center",
-						width: "100%",
-						maxHeight: "100%",
-						margin: { left: 0, right: 0, bottom: 0 },
+			const widgetKey = `${TOOL_NAME}:${toolCallId}`;
+			let questionnaire: Questionnaire | undefined;
+			let overlayHandle: OverlayHandle | undefined;
+			let abortRequested = signal.aborted;
+			let removeTerminalInput: (() => void) | undefined;
+			const setWidgetVisible = (visible: boolean) => {
+				ctx.ui.setWidget(
+					widgetKey,
+					visible && questionnaire ? () => questionnaire!.component : undefined,
+					{ placement: "aboveEditor" },
+				);
+			};
+			const collapse = new QuestionnaireCollapseController(setWidgetVisible);
+			const abort = () => {
+				abortRequested = true;
+				questionnaire?.abort();
+			};
+			signal.addEventListener("abort", abort, { once: true });
+
+			try {
+				removeTerminalInput = ctx.ui.onTerminalInput((data) => collapse.handleTerminalInput(data));
+				const result = await ctx.ui.custom<QuestionnaireResult>(
+					(tui, theme, keybindings, done) => {
+						questionnaire = new Questionnaire({
+							tui,
+							theme,
+							keybindings,
+							questions: input.questions,
+							done,
+						});
+						setWidgetVisible(true);
+						const controller = new QuestionnaireInputController(questionnaire, collapse);
+						if (abortRequested) queueMicrotask(() => questionnaire?.abort());
+						return controller.component;
 					},
-				},
-			);
-			if (!result) {
-				return toolResult("Error: terminal questionnaire UI unavailable", {
-					answers: [],
-					cancelled: true,
-					error: "no_custom_ui",
-				});
+					{
+						overlay: true,
+						overlayOptions: {
+							anchor: "bottom-left",
+							width: 1,
+							maxHeight: 1,
+							margin: 0,
+						},
+						onHandle: (handle) => {
+							overlayHandle = handle;
+							collapse.setHandle(handle);
+						},
+					},
+				);
+				if (!result) {
+					return toolResult("Error: terminal questionnaire UI unavailable", {
+						answers: [],
+						cancelled: true,
+						error: "no_custom_ui",
+					});
+				}
+				return buildQuestionnaireResponse(result);
+			} finally {
+				signal.removeEventListener("abort", abort);
+				removeTerminalInput?.();
+				collapse.dispose();
+				if (overlayHandle && !overlayHandle.isHidden()) overlayHandle.unfocus();
 			}
-			return buildQuestionnaireResponse(result);
 		},
 
 		renderCall(args, theme) {
