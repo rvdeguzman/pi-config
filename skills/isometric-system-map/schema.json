@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "isometric system map spec",
+  "description": "Input to render.mjs. Everything here must be derived from files that exist in the repository being mapped. render.mjs re-checks every citation against disk and refuses to render if one is wrong.",
+  "type": "object",
+  "required": ["meta", "nodes", "edges"],
+  "additionalProperties": true,
+
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["title", "repo", "intro"],
+      "properties": {
+        "repo": { "type": "string", "description": "Shown first in the header strip. Repo name, optionally · branch or variant." },
+        "title": { "type": "string", "description": "What this map is of — a system, not a repo. 'The Ingest Pipeline', not 'meridian'." },
+        "subtitle": { "type": "string", "description": "One line, lowercase, describing the journey the map traces." },
+        "stats": {
+          "type": "array", "minItems": 2, "maxItems": 6,
+          "description": "Domain-specific counters a maintainer would want on the wall. Never generic node/edge counts.",
+          "items": {
+            "type": "object", "required": ["label", "value"],
+            "properties": { "label": { "type": "string" }, "value": { "type": "string" } }
+          }
+        },
+        "intro": {
+          "type": "array", "items": { "type": "string" },
+          "description": "2-4 paragraphs shown when nothing is selected. Wrap a phrase in [[double brackets]] to highlight it."
+        },
+        "readIt": { "type": "string", "description": "How to read the map. Supports [[highlight]] and inline HTML." }
+      }
+    },
+
+    "groups": {
+      "type": "array",
+      "description": "Palisades. One per runtime boundary — process, deployment unit, trust zone, network edge. Not source-tree folders.",
+      "items": {
+        "type": "object", "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "kind": { "type": "string", "description": "process | deployment | trust | network" },
+          "state": { "enum": ["live", "planned"], "description": "planned draws the wall dashed — built but not switched on" },
+          "note": { "type": "string", "description": "What crossing this wall costs." }
+        }
+      }
+    },
+
+    "sections": {
+      "type": "array",
+      "description": "Legend headings, in the order they should appear. Nodes reference these by id.",
+      "items": {
+        "type": "object", "required": ["id", "title"],
+        "properties": { "id": { "type": "string" }, "title": { "type": "string" } }
+      }
+    },
+
+    "nodes": {
+      "type": "array", "minItems": 1,
+      "description": "Buildings. Hard cap 40, legible cap ~28 per level — past that, merge into district nodes and push detail into children.",
+      "items": { "$ref": "#/definitions/node" }
+    },
+
+    "edges": {
+      "type": "array",
+      "description": "Real dependencies only. Every edge must name the call site or config line that creates it.",
+      "items": {
+        "type": "object", "required": ["id", "from", "to", "kind", "cites"],
+        "properties": {
+          "id": { "type": "string" },
+          "from": { "type": "string", "description": "node id — the caller / sender" },
+          "to": { "type": "string", "description": "node id — the callee / receiver" },
+          "kind": {
+            "enum": ["control", "data", "async"],
+            "description": "control = a synchronous call, A makes B do something and waits. data = a payload moves. async = queue, event, cron, poll — decoupled in time."
+          },
+          "label": { "type": "string", "description": "Short phrase naming what actually crosses." },
+          "cites": { "$ref": "#/definitions/cites" }
+        }
+      }
+    },
+
+    "flows": {
+      "type": "array",
+      "description": "Named journeys through the graph, animated by Run the flow / Trace one step.",
+      "items": {
+        "type": "object", "required": ["id", "name", "steps"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string", "description": "Told as an event, e.g. 'An event arrives'." },
+          "steps": {
+            "type": "array", "minItems": 2,
+            "items": {
+              "type": "object", "required": ["edge", "caption"],
+              "properties": {
+                "edge": { "type": "string", "description": "edge id, in order" },
+                "caption": { "type": "string", "description": "One sentence for this hop. Supports [[highlight]]." }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "definitions": {
+    "cites": {
+      "type": "array", "minItems": 1,
+      "description": "Verified evidence. Paths are relative to --root. Cite only files you have actually read.",
+      "items": {
+        "type": "object", "required": ["path"],
+        "properties": {
+          "path": { "type": "string", "description": "Repo-relative path. Must exist on disk." },
+          "lines": { "type": "string", "pattern": "^\\d+(-\\d+)?$", "description": "\"42\" or \"42-88\". Must be inside the file." },
+          "note": { "type": "string", "description": "What is at those lines, in the reader's terms." }
+        }
+      }
+    },
+
+    "node": {
+      "type": "object",
+      "required": ["id", "code", "name", "shape", "does", "built", "cites"],
+      "properties": {
+        "id": { "type": "string" },
+        "code": {
+          "type": "string", "maxLength": 3,
+          "description": "1-2 char mnemonic worn on the roof and shown in the legend. Pick something memorable (P for the archive it Persists), never sequential letters. Children take the parent's letter plus a digit."
+        },
+        "name": { "type": "string", "description": "What a maintainer calls it out loud." },
+        "shape": {
+          "enum": ["block", "slab", "stack", "fins", "plate", "tower"],
+          "description": "block = service/process. slab = shared library everyone stands on. stack = store/archive/versioned data. fins = replicated workers, one fin per replica. plate = thin adapter/config/binding. tower = measurement, observability, or a gate everything passes through."
+        },
+        "section": { "type": "string", "description": "legend section id" },
+        "group": { "type": "string", "description": "palisade id — only if it genuinely sits inside that boundary" },
+        "metrics": {
+          "type": "object",
+          "description": "Drives the massing. Nothing here is decorative.",
+          "properties": {
+            "complexity": { "type": "number", "minimum": 1, "maximum": 5, "description": "internal complexity → height" },
+            "surface": { "type": "number", "minimum": 1, "maximum": 5, "description": "API/interface surface → footprint" },
+            "replicas": { "type": "number", "minimum": 2, "maximum": 9, "description": "fins only → number of fins" },
+            "layers": { "type": "number", "minimum": 2, "maximum": 8, "description": "stack only → number of plates" }
+          }
+        },
+        "cell": {
+          "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" },
+          "description": "Escape hatch. Pins the building to explicit grid coordinates and overrides auto-layout. Use only to fix a composition that reads wrong."
+        },
+        "does": { "type": "string", "description": "Plain language, no jargon, no framework names. What would be lost if you deleted it. Supports [[highlight]]." },
+        "built": { "type": "string", "description": "The implementation: shape of the code, the mechanism, the thing that surprised you." },
+        "condition": { "type": "string", "description": "What is currently wrong: known bugs, TODOs, dead code, missing tests, perf cliffs, unfinished migrations. Omit only when genuinely clean — never invent a fault, never hide one." },
+        "cites": { "$ref": "#/definitions/cites" },
+        "children": {
+          "type": "array",
+          "description": "Interior of this building, reachable with ↵. One level only — children may not have children.",
+          "items": { "$ref": "#/definitions/node" }
+        }
+      }
+    }
+  }
+}

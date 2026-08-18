@@ -42,13 +42,43 @@ checkpoint instead of one call for the whole plan.
 - Skip delegation entirely for single-file/quick-fix scope; spawn overhead
   isn't worth it below that size.
 
-## Grilling before building
+## Grilling before building — mandatory implementation gate, hard stop
+
+For any non-trivial implementation, redesign, or multi-file change:
 
 - Before implementing any non-trivial build or design change (new feature, redesign, architecture decision), apply the `grilling` skill first: interview me until the design tree is settled. Skip grilling for quick fixes, questions, investigations, and one-liner tasks.
 - When grilling, deliver each round's frontier questions through the ask tool in a single call — numbered questions, your recommended answer listed as the first option.
+- Until the gate below is explicitly approved:
+  1. Do not edit or write files.
+  2. Do not run mutating commands.
+  3. Do not delegate implementation to a worker/subagent.
 - Never implement during a grilling session until I confirm shared understanding.
-- After I confirm shared understanding, do not edit files yet. Present one four-option implementation gate:
+- After I confirm shared understanding, do not edit files yet. Present exactly this four-option implementation gate and wait for an explicit choice:
   1. **Work** — work on the current session.
   2. **Handoff** — when running inside Herdr (`HERDR_ENV=1`), create a new tab in the current workspace and cwd, launch Pi there, wait for its intercom session, then send it a self-contained implementation prompt. Keep the original tab open and unfocused. If Herdr or intercom is unavailable, fall back to the installed `/handoff` flow.
   3. **Artifact** — uses the `/artifact` command, similar to `/handoff`, but creates the file.
   4. **Continue design** — ask whether to refine the plan or re-run grilling; make no implementation edits.
+
+## Mandatory implementation gate — hard stop
+
+For any non-trivial implementation, redesign, or multi-file change:
+
+1. Do not edit or write files.
+2. Do not run mutating commands.
+3. Do not delegate to a worker.
+4. Grill the user until requirements and design are settled.
+5. Then present exactly the four-option implementation gate above and wait for an explicit choice.
+
+The following do **not** count as approval: “ok”, “proceed”, “one shot these”, declining the questionnaire, accepting recommended defaults, or asking what happens next.
+
+If the user declines or skips grilling, stop and ask the implementation-gate question. Never infer permission to implement.
+
+The following do NOT count as approval of the gate:
+- "ok"
+- "proceed"
+- "one shot these"
+- declining the questionnaire
+- accepting recommended defaults
+- asking what happens next
+
+If the user declines or skips grilling, stop and ask the implementation-gate question directly. Never infer permission to implement from silence, ambiguity, or unrelated replies.

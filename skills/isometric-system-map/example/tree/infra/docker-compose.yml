@@ -1,0 +1,14 @@
+services:
+  api:
+    build: .
+    command: node dist/api/server.js
+    environment: [API_TOKENS, WORKER_REPLICAS=5]
+    ports: ["8080:8080"]
+  workers:
+    build: .
+    command: node dist/workers/pool.js
+    deploy:
+      replicas: 5
+  scheduler:
+    build: .
+    command: node dist/scheduler/cron.js

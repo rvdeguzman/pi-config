@@ -1,0 +1,402 @@
+{
+  "$fixture": "EXAMPLE ONLY — this describes the toy repo under example/tree/. Its citations are real files, but the system is invented. Never copy its prose into a real map.",
+
+  "meta": {
+    "repo": "meridian · event pipeline",
+    "title": "The Ingest Pipeline",
+    "subtitle": "how an event gets accepted, enriched, filed and served",
+    "stats": [
+      { "label": "Services", "value": "6" },
+      { "label": "Worker replicas", "value": "5" },
+      { "label": "Store generations", "value": "4" },
+      { "label": "Boundaries", "value": "2 — one not switched on" }
+    ],
+    "intro": [
+      "This repository is one write path and one read path sharing a store. An event arrives at the gateway, is validated against a shared schema, and is [[appended to a durable log before the caller is acknowledged]]. Workers read log segments, enrich each record, and file it in the store. The API serves what has been filed.",
+      "The diagram is a line, not a loop: gateway → log → workers → store → API. Everything above that spine supports it — the shared schema, the auth gate, the metrics registry, the scheduler that compacts old generations. Everything to the right is what comes out.",
+      "Nearly every hard problem here turned out to be a [[durability]] problem rather than a throughput one — when to acknowledge, what to do with a poisoned segment, how to compact without losing a read. The tall structures are the parts that measure or gate."
+    ],
+    "readIt": "Hover any building for a plain description; the <mark>How it's built</mark> tab gives the implementation and the exact files behind it, and <mark>Condition</mark> lists what is currently wrong with it. Double-click a structure with <mark>↵ inside</mark> to see its parts."
+  },
+
+  "groups": [
+    {
+      "id": "core",
+      "name": "Node runtime",
+      "kind": "deployment",
+      "state": "live",
+      "note": "One image, three commands (api, workers, scheduler) — anything inside this wall is an in-process call."
+    },
+    {
+      "id": "rewrite",
+      "name": "Rust rewrite",
+      "kind": "deployment",
+      "state": "planned",
+      "note": "Compiles and passes tests, feature-gated behind MERIDIAN_RUST=1, which is set in no deployed environment."
+    }
+  ],
+
+  "sections": [
+    { "id": "write", "title": "The write path" },
+    { "id": "read", "title": "The read path" },
+    { "id": "support", "title": "Supporting the path" },
+    { "id": "rewrite", "title": "Not switched on" }
+  ],
+
+  "nodes": [
+    {
+      "id": "gateway",
+      "code": "G",
+      "name": "Ingest gateway",
+      "shape": "block",
+      "section": "write",
+      "group": "core",
+      "metrics": { "complexity": 3, "surface": 3 },
+      "does": "The front door. Takes an HTTP POST, checks the envelope is well-formed and not stale, writes it to the durable log, and only then returns 202. If the log write fails the caller finds out.",
+      "built": "A single handler mounted on the app. Validation is delegated, the log append is awaited before the response, and both outcomes bump a counter in the metrics registry.",
+      "condition": "Rejects are counted but never sampled, so a schema change that starts failing 100% of traffic looks identical to normal rejection noise on the dashboard.",
+      "cites": [
+        { "path": "src/ingest/gateway.ts", "lines": "7-20", "note": "handleIngest — validate, append, acknowledge" },
+        { "path": "src/ingest/validate.ts", "lines": "6-14", "note": "envelope validation and the 24h staleness rule" }
+      ]
+    },
+    {
+      "id": "log",
+      "code": "L",
+      "name": "Durable log",
+      "shape": "stack",
+      "section": "write",
+      "group": "core",
+      "metrics": { "complexity": 3, "surface": 3, "layers": 5 },
+      "does": "An append-only segment log. Every accepted event lands here first; this is the only thing standing between an acknowledged write and a lost one.",
+      "built": "Newline-delimited JSON appended to a segment file, rolled at 64 MB. Segments are read back whole by id.",
+      "condition": "Segment roll is not atomic and `head` lives in module state, so two processes writing the same segment will interleave lines.",
+      "cites": [
+        { "path": "src/queue/log.ts", "lines": "3-20", "note": "appendToLog, readSegment, 64MB segment roll" }
+      ]
+    },
+    {
+      "id": "workers",
+      "code": "W",
+      "name": "Enrichment workers",
+      "shape": "fins",
+      "section": "write",
+      "group": "core",
+      "metrics": { "complexity": 3, "surface": 3, "replicas": 5 },
+      "does": "Five shards chew through log segments, attach geo and org lookups to each record, and file the result. One fin per replica.",
+      "built": "A shard filter over an FNV hash of the event id, driven by a timer per replica. Replica count comes from the deployment, not the code.",
+      "condition": "No dead-letter path — a segment that throws stalls its shard permanently, and the cursor never advances past it.",
+      "cites": [
+        { "path": "src/workers/enrich.ts", "lines": "5-18", "note": "enrichSegment — shard filter and enrichment" },
+        { "path": "src/workers/pool.ts", "lines": "4-22", "note": "replica fan-out and the stalling cursor" },
+        { "path": "infra/docker-compose.yml", "lines": "9-13", "note": "replicas: 5 — the real source of the fin count" }
+      ]
+    },
+    {
+      "id": "store",
+      "code": "S",
+      "name": "Record store",
+      "shape": "stack",
+      "section": "write",
+      "group": "core",
+      "metrics": { "complexity": 3, "surface": 4, "layers": 4 },
+      "does": "Four generations of the same data — current, daily, weekly, archive. Writes always land in current; reads walk the generations until they hit.",
+      "built": "A generation list with put/get/compact. Reads fall through in order, so a cold record costs four lookups.",
+      "cites": [
+        { "path": "src/store/records.ts", "lines": "5-24", "note": "generations, putRecord, getRecord fall-through, compact" }
+      ]
+    },
+    {
+      "id": "api",
+      "code": "A",
+      "name": "Public API",
+      "shape": "block",
+      "section": "read",
+      "group": "core",
+      "metrics": { "complexity": 4, "surface": 4 },
+      "does": "Serves filed records over HTTP. Everything external reads through here, behind the auth gate.",
+      "built": "A server factory that installs the auth middleware, mounts ingest, and registers the read routes. Handlers are thin; serialisation is separate.",
+      "condition": "The list route does an unbounded scan with no pagination — it is the endpoint every complaint is actually about.",
+      "cites": [
+        { "path": "src/api/server.ts", "lines": "5-12", "note": "createServer — middleware order and mounts" },
+        { "path": "src/api/routes.ts", "lines": "3-7", "note": "route table" }
+      ],
+      "children": [
+        {
+          "id": "api-routes",
+          "code": "A1",
+          "name": "Route table",
+          "shape": "plate",
+          "metrics": { "complexity": 1, "surface": 2 },
+          "does": "Maps three URLs onto handlers. That is the whole of it.",
+          "built": "Direct registration against the app; no router abstraction, no middleware per route.",
+          "cites": [{ "path": "src/api/routes.ts", "lines": "1-7", "note": "registerRoutes" }]
+        },
+        {
+          "id": "api-handlers",
+          "code": "A2",
+          "name": "Handlers",
+          "shape": "block",
+          "metrics": { "complexity": 2, "surface": 2 },
+          "does": "Fetches a record by id and 404s when it is missing; lists records with no bound.",
+          "built": "Two async functions calling the store directly and passing results through the serialiser.",
+          "condition": "listRecordsHandler returns a hardcoded empty array and has no pagination design behind it.",
+          "cites": [{ "path": "src/api/handlers.ts", "lines": "4-13", "note": "getRecordHandler and the unbounded list" }]
+        },
+        {
+          "id": "api-wire",
+          "code": "A3",
+          "name": "Wire format",
+          "shape": "plate",
+          "metrics": { "complexity": 1, "surface": 2 },
+          "does": "Decides what leaves the building — id, timestamp, account, geo, org. The raw payload never crosses the boundary.",
+          "built": "One pure mapping function from the internal record to the wire shape.",
+          "cites": [{ "path": "src/api/serialize.ts", "lines": "3-11", "note": "toWire — the external contract" }]
+        }
+      ]
+    },
+    {
+      "id": "dashboard",
+      "code": "D",
+      "name": "Dashboard",
+      "shape": "block",
+      "section": "read",
+      "metrics": { "complexity": 1, "surface": 2 },
+      "does": "The internal read-only view. Fetches the record list on mount and renders it as a table.",
+      "built": "A single React component with one effect and no error state.",
+      "condition": "Calls the unbounded list route on every mount, which is how that endpoint gets hammered.",
+      "cites": [{ "path": "src/dashboard/app.tsx", "lines": "3-9", "note": "Dashboard component and its fetch" }]
+    },
+    {
+      "id": "edge",
+      "code": "E",
+      "name": "Edge cache",
+      "shape": "plate",
+      "section": "read",
+      "metrics": { "complexity": 1, "surface": 3 },
+      "does": "CloudFront in front of the load balancer. Caches GETs for 60 seconds, which is the only reason the list route survives.",
+      "built": "A Terraform distribution pointing at the API load balancer, caching GET and HEAD.",
+      "cites": [{ "path": "infra/terraform/edge.tf", "lines": "1-13", "note": "distribution, origin and 60s default TTL" }]
+    },
+    {
+      "id": "schema",
+      "code": "SC",
+      "name": "Shared schema",
+      "shape": "slab",
+      "section": "support",
+      "group": "core",
+      "metrics": { "complexity": 2, "surface": 5 },
+      "does": "The envelope type and the enrichment lookups. Both the write path and the read path stand on this — change it and everything moves.",
+      "built": "An interface, a hand-rolled safeParse, and two lookup stubs that currently return 'unknown'.",
+      "condition": "The geo and org lookups are stubs; every enriched record in the store carries the placeholder value.",
+      "cites": [{ "path": "src/lib/schema.ts", "lines": "1-13", "note": "Envelope, EnvelopeSchema, lookupGeo, lookupOrg" }]
+    },
+    {
+      "id": "auth",
+      "code": "AU",
+      "name": "Auth gate",
+      "shape": "tower",
+      "section": "support",
+      "group": "core",
+      "metrics": { "complexity": 2, "surface": 2 },
+      "does": "Checks a bearer token against a static allow-list before anything else runs. Nothing gets past it, including ingest.",
+      "built": "Middleware installed first in the server factory, reading a comma-separated env var into a Set.",
+      "condition": "Static tokens with no rotation and no per-token identity — a leak means changing an env var everywhere at once.",
+      "cites": [{ "path": "src/auth/gate.ts", "lines": "1-8", "note": "token set and requireToken middleware" }]
+    },
+    {
+      "id": "metrics",
+      "code": "M",
+      "name": "Metrics registry",
+      "shape": "tower",
+      "section": "support",
+      "group": "core",
+      "metrics": { "complexity": 2, "surface": 3 },
+      "does": "The only thing that knows whether any of this is working. In-process counters, scraped as text.",
+      "built": "A Map of named counters created on first use, rendered into a scrape format on demand.",
+      "condition": "Counters are per-process and reset on restart, so a crash loop looks like a quiet system.",
+      "cites": [{ "path": "src/observability/metrics.ts", "lines": "3-15", "note": "registry, counter(), scrape()" }]
+    },
+    {
+      "id": "scheduler",
+      "code": "K",
+      "name": "Scheduler",
+      "shape": "block",
+      "section": "support",
+      "group": "core",
+      "metrics": { "complexity": 1, "surface": 2 },
+      "does": "Rolls store generations on a clock — current into daily at 03:00, daily into weekly on Sundays.",
+      "built": "A static job list wired to a schedule() call, run as its own command from the same image.",
+      "condition": "schedule() is an empty stub; no compaction has ever actually run in this repo.",
+      "cites": [
+        { "path": "src/scheduler/cron.ts", "lines": "3-12", "note": "job table and the no-op schedule()" },
+        { "path": "infra/docker-compose.yml", "lines": "1-14", "note": "scheduler runs as a separate command" }
+      ]
+    },
+    {
+      "id": "rs-ingest",
+      "code": "R",
+      "name": "Rust gateway",
+      "shape": "block",
+      "section": "rewrite",
+      "group": "rewrite",
+      "metrics": { "complexity": 2, "surface": 3 },
+      "does": "A like-for-like replacement of the ingest gateway in Rust. Finished, tested, and receiving no traffic.",
+      "built": "An axum router with one POST route that parses and appends, returning 202 or 422.",
+      "condition": "Nothing routes to it. The cutover has no owner and no date.",
+      "cites": [{ "path": "rewrite/src/ingest.rs", "lines": "1-15", "note": "axum router and accept handler" }]
+    },
+    {
+      "id": "rs-workers",
+      "code": "RW",
+      "name": "Rust workers",
+      "shape": "fins",
+      "section": "rewrite",
+      "group": "rewrite",
+      "metrics": { "complexity": 2, "surface": 2, "replicas": 4 },
+      "does": "The shard pool rewritten on tokio tasks. Same shape as the Node workers, one fin per shard.",
+      "built": "A JoinSet spawning one task per shard, awaited to completion.",
+      "condition": "enrich_shard is an empty body behind the MERIDIAN_RUST feature gate — the port was never finished.",
+      "cites": [{ "path": "rewrite/src/workers.rs", "lines": "3-13", "note": "JoinSet fan-out and the empty shard body" }]
+    }
+  ],
+
+  "edges": [
+    {
+      "id": "e-gw-log",
+      "from": "gateway",
+      "to": "log",
+      "kind": "control",
+      "label": "awaited before the 202 goes back",
+      "cites": [{ "path": "src/ingest/gateway.ts", "lines": "16", "note": "await appendToLog(verdict.envelope)" }]
+    },
+    {
+      "id": "e-gw-schema",
+      "from": "schema",
+      "to": "gateway",
+      "kind": "data",
+      "label": "envelope contract",
+      "cites": [{ "path": "src/ingest/validate.ts", "lines": "1", "note": "imports EnvelopeSchema" }]
+    },
+    {
+      "id": "e-log-workers",
+      "from": "log",
+      "to": "workers",
+      "kind": "async",
+      "label": "polled segment by segment",
+      "cites": [{ "path": "src/workers/enrich.ts", "lines": "6", "note": "readSegment(segmentId)" }]
+    },
+    {
+      "id": "e-workers-schema",
+      "from": "schema",
+      "to": "workers",
+      "kind": "data",
+      "label": "geo and org lookups",
+      "cites": [{ "path": "src/workers/enrich.ts", "lines": "3", "note": "imports lookupGeo, lookupOrg" }]
+    },
+    {
+      "id": "e-workers-store",
+      "from": "workers",
+      "to": "store",
+      "kind": "control",
+      "label": "files the enriched record",
+      "cites": [{ "path": "src/workers/enrich.ts", "lines": "15", "note": "await putRecord(record)" }]
+    },
+    {
+      "id": "e-store-api",
+      "from": "store",
+      "to": "api",
+      "kind": "data",
+      "label": "generation fall-through read",
+      "cites": [{ "path": "src/api/handlers.ts", "lines": "5", "note": "await getRecord(req.params.id)" }]
+    },
+    {
+      "id": "e-auth-api",
+      "from": "auth",
+      "to": "api",
+      "kind": "control",
+      "label": "installed before every route",
+      "cites": [{ "path": "src/api/server.ts", "lines": "7", "note": "app.use(requireToken)" }]
+    },
+    {
+      "id": "e-api-gw",
+      "from": "api",
+      "to": "gateway",
+      "kind": "control",
+      "label": "ingest is mounted on the same app",
+      "cites": [{ "path": "src/api/server.ts", "lines": "8", "note": "mountIngest(app)" }]
+    },
+    {
+      "id": "e-api-edge",
+      "from": "api",
+      "to": "edge",
+      "kind": "data",
+      "label": "cached 60s at the edge",
+      "cites": [{ "path": "infra/terraform/edge.tf", "lines": "4-6", "note": "origin points at the API load balancer" }]
+    },
+    {
+      "id": "e-edge-dash",
+      "from": "edge",
+      "to": "dashboard",
+      "kind": "data",
+      "label": "list fetch on mount",
+      "cites": [{ "path": "src/dashboard/app.tsx", "lines": "6", "note": "fetch('/v1/records')" }]
+    },
+    {
+      "id": "e-gw-metrics",
+      "from": "gateway",
+      "to": "metrics",
+      "kind": "data",
+      "label": "accepted / rejected counters",
+      "cites": [{ "path": "src/ingest/gateway.ts", "lines": "5-6", "note": "counter('ingest_accepted_total')" }]
+    },
+    {
+      "id": "e-sched-store",
+      "from": "scheduler",
+      "to": "store",
+      "kind": "async",
+      "label": "nightly compaction",
+      "cites": [{ "path": "src/scheduler/cron.ts", "lines": "4-5", "note": "compact('current','daily')" }]
+    },
+    {
+      "id": "e-routes-handlers",
+      "from": "api-routes",
+      "to": "api-handlers",
+      "kind": "control",
+      "label": "route table points straight at the handler functions",
+      "cites": [{ "path": "src/api/routes.ts", "lines": "1", "note": "imports getRecordHandler, listRecordsHandler" }]
+    },
+    {
+      "id": "e-handlers-wire",
+      "from": "api-handlers",
+      "to": "api-wire",
+      "kind": "data",
+      "label": "record is reshaped before it leaves",
+      "cites": [{ "path": "src/api/handlers.ts", "lines": "8", "note": "Response.json(toWire(rec))" }]
+    },
+    {
+      "id": "e-rs-ingest-workers",
+      "from": "rs-ingest",
+      "to": "rs-workers",
+      "kind": "async",
+      "label": "same segment hand-off, in Rust",
+      "cites": [{ "path": "rewrite/src/ingest.rs", "lines": "10", "note": "crate::log::append(env)" }]
+    }
+  ],
+
+  "flows": [
+    {
+      "id": "accept",
+      "name": "An event arrives",
+      "steps": [
+        { "edge": "e-auth-api", "caption": "The bearer token is checked before anything else runs." },
+        { "edge": "e-api-gw", "caption": "Ingest is mounted on the same server, so the POST lands in the gateway." },
+        { "edge": "e-gw-log", "caption": "The envelope is appended to the durable log — [[the caller is not acknowledged until this returns]]." },
+        { "edge": "e-log-workers", "caption": "A worker shard picks the segment up on its next tick." },
+        { "edge": "e-workers-store", "caption": "The enriched record is filed into the current generation." },
+        { "edge": "e-store-api", "caption": "A read walks the generations until it finds the record." },
+        { "edge": "e-api-edge", "caption": "The response is cached for 60 seconds at the edge." }
+      ]
+    }
+  ]
+}
