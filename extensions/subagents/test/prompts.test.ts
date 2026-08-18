@@ -1,5 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { getAgentConfig, registerAgents } from "../src/agent-types.js";
+import { describe, expect, it } from "vitest";
 import { buildAgentPrompt } from "../src/prompts.js";
 import type { AgentConfig, EnvInfo } from "../src/types.js";
 
@@ -15,62 +14,50 @@ const envNoGit: EnvInfo = {
   platform: "linux",
 };
 
-// Initialize default agents
-beforeEach(() => {
-  registerAgents(new Map());
-});
-
-function getDefaultConfig(name: string): AgentConfig {
-  return getAgentConfig(name)!;
+// A parent-twin config shaped like the general-purpose agent: append mode,
+// empty systemPrompt, so it clones the parent's own instructions verbatim.
+function parentTwinConfig(): AgentConfig {
+  return {
+    name: "general-purpose",
+    description: "General-purpose agent",
+    builtinToolNames: [],
+    extensions: true,
+    skills: true,
+    systemPrompt: "",
+    promptMode: "append",
+    inheritContext: false,
+    runInBackground: false,
+    isolated: false,
+  };
 }
 
 describe("buildAgentPrompt", () => {
   it("includes cwd and git info", () => {
-    const config = getDefaultConfig("general-purpose");
-    const prompt = buildAgentPrompt(config, "/workspace", env);
+    const prompt = buildAgentPrompt(parentTwinConfig(), "/workspace", env);
     expect(prompt).toContain("/workspace");
     expect(prompt).toContain("Branch: main");
     expect(prompt).toContain("darwin");
   });
 
   it("handles non-git repos", () => {
-    const config = getDefaultConfig("Explore");
-    const prompt = buildAgentPrompt(config, "/workspace", envNoGit);
+    const prompt = buildAgentPrompt(parentTwinConfig(), "/workspace", envNoGit);
     expect(prompt).toContain("Not a git repository");
     expect(prompt).not.toContain("Branch:");
   });
 
-  it("Explore prompt is read-only", () => {
-    const config = getDefaultConfig("Explore");
-    const prompt = buildAgentPrompt(config, "/workspace", env);
-    expect(prompt).toContain("READ-ONLY");
-    expect(prompt).toContain("file search specialist");
-  });
-
-  it("Plan prompt is read-only", () => {
-    const config = getDefaultConfig("Plan");
-    const prompt = buildAgentPrompt(config, "/workspace", env);
-    expect(prompt).toContain("READ-ONLY");
-    expect(prompt).toContain("software architect");
-  });
-
   it("general-purpose uses append mode (parent twin)", () => {
-    const config = getDefaultConfig("general-purpose");
     const parentPrompt = "You are a parent coding agent with full powers.";
-    const prompt = buildAgentPrompt(config, "/workspace", env, parentPrompt);
+    const prompt = buildAgentPrompt(parentTwinConfig(), "/workspace", env, parentPrompt);
     expect(prompt).toContain("parent coding agent with full powers");
     expect(prompt).toContain("<sub_agent_context>");
     expect(prompt).not.toContain("<inherited_system_prompt>");
-    expect(prompt).not.toContain("READ-ONLY");
     // Empty systemPrompt means no <agent_instructions> section
     expect(prompt).not.toContain("<agent_instructions>");
   });
 
   it("general-purpose without parent prompt falls back to generic base", () => {
-    const config = getDefaultConfig("general-purpose");
-    const prompt = buildAgentPrompt(config, "/workspace", env);
+    const prompt = buildAgentPrompt(parentTwinConfig(), "/workspace", env);
     expect(prompt).toContain("general-purpose coding agent");
-    expect(prompt).not.toContain("READ-ONLY");
   });
 
   it("append mode with parent prompt includes parent + custom instructions", () => {
@@ -175,8 +162,7 @@ describe("buildAgentPrompt", () => {
   });
 
   it("append mode bridge contains tool reminders", () => {
-    const config = getDefaultConfig("general-purpose");
-    const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
+    const prompt = buildAgentPrompt(parentTwinConfig(), "/workspace", env, "Parent prompt.");
     expect(prompt).toContain("Use the read tool instead of cat");
     expect(prompt).toContain("Use the edit tool instead of sed");
     expect(prompt).toContain("Use the grep tool instead of");

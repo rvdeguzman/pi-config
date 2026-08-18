@@ -1,12 +1,11 @@
 /**
  * agent-types.ts — Unified agent type registry.
  *
- * Merges embedded default agents with user-defined agents from .pi/agents/*.md, .agents/agents/*.md, and global agents.
- * User agents override defaults with the same name. Disabled agents are kept but excluded from spawning.
+ * Loads user-defined agents from .pi/agents/*.md, .agents/agents/*.md, and global agents.
+ * Disabled agents are kept but excluded from spawning.
  */
 
 import { createCodingTools, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_AGENTS } from "./default-agents.js";
 import type { AgentConfig } from "./types.js";
 
 /**
@@ -21,17 +20,8 @@ export const BUILTIN_TOOL_NAMES: string[] = [
   ...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map((t) => t.name)),
 ];
 
-/** Unified runtime registry of all agents (defaults + user-defined). */
+/** Unified runtime registry of all agents (user-defined). */
 const agents = new Map<string, AgentConfig>();
-
-/** When true, DEFAULT_AGENTS are skipped during registration. */
-let disableDefaults = false;
-
-/** Check whether default agents are disabled. */
-export function isDefaultsDisabled(): boolean { return disableDefaults; }
-
-/** Set whether default agents are disabled. */
-export function setDefaultsDisabled(b: boolean): void { disableDefaults = b; }
 
 /** `fallbackSubagent` value that disables the fallback entirely (strict dispatch). */
 export const NO_FALLBACK = "none";
@@ -54,30 +44,12 @@ export function getFallbackSubagent(): string | undefined { return fallbackSubag
 export function setFallbackSubagent(v: string | undefined): void { fallbackSubagent = v; }
 
 /**
- * Build a registry map: DEFAULT_AGENTS first (unless disabled via settings),
- * then user agents overlaid on top (same name overrides the default).
- * Pure — callers that must not disturb the process-wide registry (nested
- * delegation resolving agents from its own config root) build their own map.
- */
-export function buildAgentRegistry(userAgents: Map<string, AgentConfig>): Map<string, AgentConfig> {
-  const registry = new Map<string, AgentConfig>();
-  if (!disableDefaults) {
-    for (const [name, config] of DEFAULT_AGENTS) registry.set(name, config);
-  }
-  for (const [name, config] of userAgents) registry.set(name, config);
-  return registry;
-}
-
-/**
  * Register agents into the unified registry.
- * Starts with DEFAULT_AGENTS, then overlays user agents (overrides defaults with same name).
  * Disabled agents (enabled === false) are kept in the registry but excluded from spawning.
  */
 export function registerAgents(userAgents: Map<string, AgentConfig>): void {
   agents.clear();
-  for (const [name, config] of buildAgentRegistry(userAgents)) {
-    agents.set(name, config);
-  }
+  for (const [name, config] of userAgents) agents.set(name, config);
 }
 
 /** Case-insensitive key resolution within a registry. */
@@ -210,11 +182,9 @@ export function resolveSpawnTypeIn(
     return { ok: true, type: fallbackKey, fellBackFrom: raw };
   }
 
-  // Unset: historical behavior, deliberately unchanged. #183 asks for the
-  // fallback to remain the default, so the pre-existing hole it leaves — an
-  // unregistered general-purpose resolving to `getConfig`'s all-tools hardcoded
-  // tier — is what `fallbackSubagent: none` is for, not something to close
-  // under everyone silently.
+  // Unset: historical behavior. Dispatch falls back to general-purpose even
+  // when no matching file is registered; getConfig/runAgent keep the defensive
+  // parent-twin fallback for direct and legacy callers.
   return { ok: true, type: "general-purpose", fellBackFrom: raw };
 }
 
@@ -241,20 +211,6 @@ export function getAvailableTypes(): string[] {
 /** Get all type names including disabled (for UI listing). */
 export function getAllTypes(): string[] {
   return [...agents.keys()];
-}
-
-/** Get names of default agents currently in the registry. */
-export function getDefaultAgentNames(): string[] {
-  return [...agents.entries()]
-    .filter(([_, config]) => config.isDefault === true)
-    .map(([name]) => name);
-}
-
-/** Get names of user-defined agents (non-defaults) currently in the registry. */
-export function getUserAgentNames(): string[] {
-  return [...agents.entries()]
-    .filter(([_, config]) => config.isDefault !== true)
-    .map(([name]) => name);
 }
 
 /** Check if a type is valid and enabled (case-insensitive). */

@@ -33,7 +33,7 @@ const RESERVED_IN_TYPE = ":";
  * Project-level agents override global ones with the same name. On a name clash
  * between the two project locations, .pi/agents wins — .pi stays the project
  * authority; .agents/agents is an additional read location.
- * Any name is allowed — names matching defaults (e.g. "Explore") override them.
+ * Any name is allowed.
  *
  * An agent's type comes from its frontmatter `name:`, falling back to the
  * filename — Claude Code's rule, where "the filename doesn't have to match".

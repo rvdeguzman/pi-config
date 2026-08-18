@@ -1,7 +1,6 @@
 /**
  * agent-file-toggle.ts — Pure helpers for the `/agents` file-editing operations:
- * locating an agent's .md file, toggling its `enabled:` frontmatter flag, and
- * serializing an AgentConfig back to frontmatter for eject.
+ * locating an agent's .md file and toggling its `enabled:` frontmatter flag.
  *
  * These live outside src/index.ts so they can be tested directly: the `/agents`
  * command handler is an ~890-line closure reached only through `registerCommand`,
@@ -28,7 +27,6 @@
 import { existsSync } from "node:fs";
 import { join, sep } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import type { AgentConfig } from "./types.js";
 
 export type AgentFileLocation = "project" | "workspace" | "personal";
 
@@ -66,8 +64,8 @@ export function findAgentFile(
  * and write a NEW `code-reviewer.md` stub, which loses to `reviewer.md` on
  * load, leaving the agent enabled while reporting success.
  *
- * The probe stays as the fallback: a built-in that was never ejected has no
- * `sourcePath`, and a path can go stale between a load and this call.
+ * The probe stays as the fallback because a path can go stale between a load
+ * and this call.
  */
 export function locateAgentFile(
   name: string,
@@ -170,11 +168,6 @@ export function enableInContent(content: string): { content: string; changed: bo
   return { content: kept.join(""), changed: true };
 }
 
-/** Is this the empty stub `/agents` writes when disabling a built-in default? */
-export function isEmptyStub(content: string): boolean {
-  return content.replace(/\r\n/g, "\n").trim() === "---\n---";
-}
-
 /** The answers `/agents → Create agent → Manual` collects, before serialization. */
 export interface NewAgentInput {
   description: string;
@@ -191,8 +184,7 @@ export interface NewAgentInput {
  * Build the .md file the create wizard writes.
  *
  * `description` and `model` come straight from a free-text prompt, so they are
- * quoted rather than interpolated — `serializeAgentFile` above quotes the
- * description for the same reason. An unquoted YAML scalar mishandles ordinary
+ * quoted rather than interpolated. An unquoted YAML scalar mishandles ordinary
  * input in two ways, and both are silent: a colon ("Scout: find things") makes
  * the file unparseable, and since #212 an unparseable agent file is *skipped*,
  * so the wizard reports success for an agent that does not exist; a `#`
@@ -213,44 +205,4 @@ prompt_mode: replace
 
 ${input.systemPrompt}
 `;
-}
-
-/** Render a built-in tool list as a `tools:` frontmatter value. */
-function formatToolsField(tools: string[] | undefined): string {
-  if (tools === undefined) return "all";
-  if (tools.length === 0) return "none";
-  return tools.join(", ");
-}
-
-/** Serialize an AgentConfig to a full .md file (frontmatter + system prompt) for eject. */
-export function serializeAgentFile(cfg: AgentConfig): string {
-  const fmFields: string[] = [];
-  fmFields.push(`description: ${JSON.stringify(cfg.description)}`);
-  if (cfg.displayName) fmFields.push(`display_name: ${cfg.displayName}`);
-  if (cfg.color) fmFields.push(`color: ${JSON.stringify(cfg.color)}`);
-  // Absent means "all built-ins"; an EMPTY list means explicitly zero. Writing
-  // `all` for both would hand a deliberately tool-less agent the whole toolbox
-  // the first time it is ejected.
-  fmFields.push(`tools: ${formatToolsField(cfg.builtinToolNames)}`);
-  if (cfg.model) fmFields.push(`model: ${cfg.model}`);
-  if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
-  if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
-  if (cfg.allowedSubagents !== undefined) {
-    fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
-  }
-  fmFields.push(`prompt_mode: ${cfg.promptMode}`);
-  if (cfg.extensions === false) fmFields.push("extensions: false");
-  else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
-  if (cfg.excludeExtensions?.length) fmFields.push(`exclude_extensions: ${cfg.excludeExtensions.join(", ")}`);
-  if (cfg.skills === false) fmFields.push("skills: false");
-  else if (Array.isArray(cfg.skills)) fmFields.push(`skills: ${cfg.skills.join(", ")}`);
-  if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
-  if (cfg.inheritContext) fmFields.push("inherit_context: true");
-  if (cfg.runInBackground) fmFields.push("run_in_background: true");
-  if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
-  if (cfg.isolated) fmFields.push("isolated: true");
-  if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
-  if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
-
-  return `---\n${fmFields.join("\n")}\n---\n\n${cfg.systemPrompt}\n`;
 }

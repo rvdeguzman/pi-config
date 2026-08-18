@@ -8,11 +8,8 @@ import type { LifetimeUsage } from "./usage.js";
 
 export type { ThinkingLevel };
 
-/** Agent type: any string name (built-in defaults or user-defined). */
+/** Agent type: any string name. */
 export type SubagentType = string;
-
-/** Names of the three embedded default agents. */
-export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as const;
 
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";
@@ -30,7 +27,7 @@ export type MemoryScope = "user" | "project" | "local";
  */
 export type IsolationMode = "worktree" | "off";
 
-/** Unified agent configuration — used for both default and user-defined agents. */
+/** Unified agent configuration loaded from an agent .md file. */
 export interface AgentConfig {
   name: string;
   /** UI name. `display_name` wins; Claude Code's `name` is accepted as a fallback. */
@@ -80,13 +77,11 @@ export interface AgentConfig {
    * "off" refuses one even when the caller asks (frontmatter outranks params).
    */
   isolation?: IsolationMode;
-  /** true = this is an embedded default agent (informational) */
-  isDefault?: boolean;
   /** false = agent is hidden from the registry */
   enabled?: boolean;
   /** Where this agent was loaded from */
-  source?: "default" | "project" | "global";
-  /** Path of the .md it was loaded from. Unset for embedded defaults. */
+  source?: "project" | "global";
+  /** Path of the .md it was loaded from. */
   sourcePath?: string;
 }
 

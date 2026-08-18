@@ -20,13 +20,12 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
-import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -613,16 +612,21 @@ export async function runAgent(
     }
   }
 
-  // Build system prompt from agent config
   let systemPrompt: string;
   if (agentConfig) {
     systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
   } else {
-    // Unknown type fallback: spread the canonical general-purpose config (defensive —
-    // unreachable in practice since index.ts resolves unknown types before calling runAgent).
-    const fallback = DEFAULT_AGENTS.get("general-purpose");
-    if (!fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
-    systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, parentSystemPrompt, extras);
+    // Defensive parent-twin fallback for direct/legacy callers. Normal Agent
+    // dispatch resolves a registered file before reaching runAgent.
+    const fallback: AgentConfig = {
+      name: type,
+      description: "General-purpose agent for complex, multi-step tasks",
+      extensions: true,
+      skills: true,
+      systemPrompt: "",
+      promptMode: "append",
+    };
+    systemPrompt = buildAgentPrompt(fallback, effectiveCwd, env, parentSystemPrompt, extras);
   }
 
   // When skills is string[], we've already preloaded them into the prompt.

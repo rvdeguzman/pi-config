@@ -86,9 +86,20 @@ function finishedRun(session: any) {
   } as any);
 }
 
-/** Boot the real extension. `outputTranscript: false` keeps the run off disk. */
+/**
+ * Boot the real extension. `outputTranscript: false` keeps the run off disk.
+ * Seeds the conventional agents this file addresses. They are stand-in
+ * resolvable types, not fixtures for their own prompts/tools/models.
+ */
 function boot(settings: Record<string, unknown> = {}) {
-  hermetic = hermeticDir({ settings: { outputTranscript: false, ...settings } });
+  hermetic = hermeticDir({
+    settings: { outputTranscript: false, ...settings },
+    agentFiles: {
+      "general-purpose": "---\ndescription: general work\n---\nbody",
+      Explore: "---\ndescription: finds things\n---\nbody",
+      Plan: "---\ndescription: plans things\n---\nbody",
+    },
+  });
   const b = makePi();
   subagentsExtension(b.pi);
   booted = b.lifecycle;

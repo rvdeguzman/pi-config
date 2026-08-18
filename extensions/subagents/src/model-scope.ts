@@ -3,8 +3,8 @@
  * the nested delegation tools so a nested spawn can't escape the allowlist the
  * top-level path enforces.
  *
- * State lives here (rather than in an index.ts closure) for the same reason
- * `disableDefaults` lives in agent-types.ts: both entry points need it.
+ * State lives here rather than in an index.ts closure because both entry
+ * points need it.
  */
 
 import { isModelInScope, type ModelRegistryRef, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";

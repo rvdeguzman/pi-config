@@ -50,6 +50,7 @@ let originalHome: string | undefined;
 function writeAgents(): void {
   const dir = join(cwd, ".pi", "agents");
   mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "general-purpose.md"), "---\ndescription: General purpose\n---\nGeneral.\n");
   writeFileSync(join(dir, "scout.md"), "---\ndescription: Scout\ntools: read\n---\nScout.\n");
   writeFileSync(join(dir, "retired.md"), "---\ndescription: Retired\ntools: read\nenabled: false\n---\nRetired.\n");
 }

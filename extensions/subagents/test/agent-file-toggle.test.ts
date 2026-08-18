@@ -19,7 +19,6 @@ import {
   enableInContent,
   findAgentFile,
   isDisabledContent,
-  isEmptyStub,
   locateAgentFile,
 } from "../src/agent-file-toggle.js";
 
@@ -199,17 +198,6 @@ describe("read and write paths agree", () => {
     const disabled = disableInContent(ENABLED);
     expect(disabled.outcome).toBe("disabled");
     expect(enableInContent(disabled.content).content).toBe(ENABLED);
-  });
-});
-
-describe("isEmptyStub", () => {
-  it("recognizes the stub /agents writes to disable a built-in default", () => {
-    expect(isEmptyStub("---\n---\n")).toBe(true);
-    expect(isEmptyStub(enableInContent("---\nenabled: false\n---\n").content)).toBe(true);
-  });
-
-  it("is false for a file with real frontmatter", () => {
-    expect(isEmptyStub(ENABLED)).toBe(false);
   });
 });
 

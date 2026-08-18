@@ -13,6 +13,22 @@ import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const EXAMPLE_TEMPLATE = fileURLToPath(new URL("../examples/agent-tool-description.md", import.meta.url));
 
+// This file has no embedded defaults to fall back on, so it seeds "general-purpose"
+// and "Explore" as ordinary project agents. Explore's description is asserted
+// against verbatim below ("very thorough", the compact first-sentence text), so
+// it mirrors the description users are expected to write for a search agent.
+const GENERAL_PURPOSE_MD = `---
+description: General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks.
+tools: all
+prompt_mode: append
+---
+`;
+const EXPLORE_MD = `---
+description: "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \\"src/components/**/*.tsx\\"), grep for symbols or keywords (eg. \\"API endpoints\\"), or answer \\"where is X defined / which files reference Y.\\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \\"quick\\" for a single targeted lookup, \\"medium\\" for moderate exploration, or \\"very thorough\\" to search across multiple locations and naming conventions."
+tools: read, bash, grep, find, ls
+---
+`;
+
 function makePi() {
   const tools = new Map<string, any>();
   const handlers = new Map<string, any>();
@@ -57,7 +73,9 @@ describe("toolDescriptionMode", () => {
     process.env.PI_CODING_AGENT_DIR = hermeticAgentDir;
     process.env.HOME = hermeticAgentDir;
     prevCwd = process.cwd();
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
+    writeFileSync(join(tmpDir, ".pi", "agents", "general-purpose.md"), GENERAL_PURPOSE_MD);
+    writeFileSync(join(tmpDir, ".pi", "agents", "Explore.md"), EXPLORE_MD);
     if (settings) {
       writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify(settings));
     }
@@ -361,8 +379,8 @@ describe("toolDescriptionMode", () => {
     });
 
     it("an omitted `tools:` still renders as * — absent means all built-ins", () => {
-      // Guards the fix from over-correcting: undefined (inherit everything,
-      // as the shipped defaults do) is not the same as [] (explicitly zero).
+      // Guards the fix from over-correcting: undefined (inherit everything)
+      // is not the same as [] (explicitly zero).
       const tools = withAgent("broad", "");
       const desc: string = tools.get("Agent").description;
       expect(desc).toContain("- broad: broad agent. (Tools: *)");

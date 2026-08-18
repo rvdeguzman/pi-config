@@ -17,10 +17,10 @@ import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Tex
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
-import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
+import { buildNewAgentFile, disableInContent, enableInContent, locateAgentFile, personalAgentsDir, projectAgentsDir } from "./agent-file-toggle.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -241,7 +241,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
  * Two distinctions matter, both of them capability claims the orchestrator acts on:
  *
  * - absent vs empty. `builtinToolNames: undefined` means the agent never narrowed
- *   its tools (the shipped defaults); `[]` is what `tools: none` and an `ext:`-only
+ *   the loader's default tool set; `[]` is what `tools: none` and an `ext:`-only
  *   `tools:` parse to, and the runtime really does hand those agents no built-ins.
  *   Rendering both "*" tells the orchestrator a tool-less agent can run `bash`.
  * - empty-with-extensions vs empty-without. Zero built-ins does NOT imply zero
@@ -326,10 +326,9 @@ export default function (pi: ExtensionAPI) {
   // the initial load, which happens hundreds of lines before settings are applied.
   let strictAgentFiles = loadSettings(process.cwd()).strictAgentFiles === true;
 
-  /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
+  /** Reload agents from project/global agent dirs (called on init and each Agent invocation). */
   const reloadCustomAgents = (strict = false) => {
-    const userAgents = loadCustomAgents(process.cwd(), strict);
-    registerAgents(userAgents);
+    registerAgents(loadCustomAgents(process.cwd(), strict));
   };
 
   // Initial load — the only strict one. A bad edit mid-session must not kill the
@@ -967,18 +966,6 @@ export default function (pi: ExtensionAPI) {
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
-  // ---- Disable default agents configuration ----
-  // When enabled, the three hardcoded default agents (general-purpose, Explore,
-  // Plan) are not registered. User-defined agents from project/global custom
-  // agent dirs are completely unaffected — only DEFAULT_AGENTS are suppressed.
-  // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
-  // State lives in agent-types.ts (isDefaultsDisabled) because registerAgents
-  // needs it; this wrapper just re-registers after flipping it.
-  function setDisableDefaultAgents(b: boolean): void {
-    setDefaultsDisabled(b);
-    reloadCustomAgents(); // re-register with new setting
-  }
-
   // ---- Agent tool description mode ----
   // "full" (default) keeps the rich Claude Code-style description; "compact"
   // swaps in a ~75% smaller one for small/local models (#91). Read once at
@@ -1176,7 +1163,6 @@ export default function (pi: ExtensionAPI) {
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
-      setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
       setAgentMentions: setAgentMentionMode,
@@ -1248,7 +1234,7 @@ Notes:
 Available agent types and the tools they have access to:
 ${buildTypeListText()}
 
-Custom agents can be defined in .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
+Agents are defined in .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones.
 
 When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
 
@@ -2168,8 +2154,7 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
-    // Source indicators: defaults unmarked, custom agents get • (project) or ◦ (global)
-    // Disabled agents get ✕ prefix
+    // Source indicators: • (project) or ◦ (global). Disabled agents get ✕ prefix.
     const sourceIndicator = (cfg: AgentConfig | undefined) => {
       const disabled = cfg?.enabled === false;
       if (cfg?.source === "project") return disabled ? "✕• " : "•  ";
@@ -2196,7 +2181,7 @@ Terse command-style prompts produce shallow, generic work.
       };
     });
 
-    const hasCustom = allNames.some(n => { const c = getAgentConfig(n); return c && !c.isDefault && c.enabled !== false; });
+    const hasCustom = allNames.some(n => getAgentConfig(n)?.enabled !== false);
     const hasDisabled = allNames.some(n => getAgentConfig(n)?.enabled === false);
     const legendParts: string[] = [];
     if (hasCustom) legendParts.push("• = project  ◦ = global");
@@ -2284,25 +2269,11 @@ Terse command-style prompts produce shallow, generic work.
     }
 
     const file = locateAgentFile(name, cfg.sourcePath);
-    const isDefault = cfg.isDefault === true;
     const disabled = cfg.enabled === false;
 
-    let menuOptions: string[];
-    if (disabled && file) {
-      // Disabled agent with a file — offer Enable
-      menuOptions = isDefault
-        ? ["Enable", "Edit", "Reset to default", "Delete", "Back"]
-        : ["Enable", "Edit", "Delete", "Back"];
-    } else if (isDefault && !file) {
-      // Default agent with no .md override
-      menuOptions = ["Eject (export as .md)", "Disable", "Back"];
-    } else if (isDefault && file) {
-      // Default agent with .md override (ejected)
-      menuOptions = ["Edit", "Disable", "Reset to default", "Delete", "Back"];
-    } else {
-      // User-defined agent
-      menuOptions = ["Edit", "Disable", "Delete", "Back"];
-    }
+    const menuOptions: string[] = disabled && file
+      ? ["Enable", "Edit", "Delete", "Back"]
+      : ["Edit", "Disable", "Delete", "Back"];
 
     const choice = await ctx.ui.select(name, menuOptions);
     if (!choice || choice === "Back") return;
@@ -2325,15 +2296,6 @@ Terse command-style prompts produce shallow, generic work.
           ctx.ui.notify(`Deleted ${file.path}`, "info");
         }
       }
-    } else if (choice === "Reset to default" && file) {
-      const confirmed = await ctx.ui.confirm("Reset to default", `Delete override ${file.path} and restore embedded default?`);
-      if (confirmed) {
-        unlinkSync(file.path);
-        reloadCustomAgents();
-        ctx.ui.notify(`Restored default ${name}`, "info");
-      }
-    } else if (choice.startsWith("Eject")) {
-      await ejectAgent(ctx, name, cfg);
     } else if (choice === "Disable") {
       await disableAgent(ctx, name);
     } else if (choice === "Enable") {
@@ -2341,70 +2303,27 @@ Terse command-style prompts produce shallow, generic work.
     }
   }
 
-  /** Eject a default agent: write its embedded config as a .md file. */
-  async function ejectAgent(ctx: ExtensionCommandContext, name: string, cfg: AgentConfig) {
-    const location = await ctx.ui.select("Choose location", [
-      "Project (.pi/agents/)",
-      `Personal (${personalAgentsDir()})`,
-    ]);
-    if (!location) return;
-
-    const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-    mkdirSync(targetDir, { recursive: true });
-
-    const targetPath = join(targetDir, `${name}.md`);
-    if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
-      if (!overwrite) return;
-    }
-
-    const content = serializeAgentFile(cfg);
-
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(targetPath, content, "utf-8");
-    reloadCustomAgents();
-    ctx.ui.notify(`Ejected ${name} to ${targetPath}`, "info");
-  }
-
-  /** Disable an agent: set enabled: false in its .md file, or create a stub for built-in defaults. */
+  /** Disable an agent: set enabled: false in its .md file. */
   async function disableAgent(ctx: ExtensionCommandContext, name: string) {
     const file = locateAgentFile(name, getAgentConfig(name)?.sourcePath);
-    if (file) {
-      // Existing file — set enabled: false in frontmatter (idempotent)
-      const content = readFileSync(file.path, "utf-8");
-      const { content: updated, outcome } = disableInContent(content);
-      if (outcome === "already-disabled") {
-        ctx.ui.notify(`${name} is already disabled.`, "info");
-        return;
-      }
-      if (outcome === "no-frontmatter") {
-        // Nothing to edit — say so rather than rewriting the file unchanged and
-        // reporting success for a change that never happened.
-        ctx.ui.notify(`Cannot disable ${name}: ${file.path} has no frontmatter block.`, "error");
-        return;
-      }
-      const { writeFileSync } = await import("node:fs");
-      writeFileSync(file.path, updated, "utf-8");
-      reloadCustomAgents();
-      ctx.ui.notify(`Disabled ${name} (${file.path})`, "info");
+    if (!file) return;
+
+    const content = readFileSync(file.path, "utf-8");
+    const { content: updated, outcome } = disableInContent(content);
+    if (outcome === "already-disabled") {
+      ctx.ui.notify(`${name} is already disabled.`, "info");
       return;
     }
-
-    // No file (built-in default) — create a stub
-    const location = await ctx.ui.select("Choose location", [
-      "Project (.pi/agents/)",
-      `Personal (${personalAgentsDir()})`,
-    ]);
-    if (!location) return;
-
-    const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-    mkdirSync(targetDir, { recursive: true });
-
-    const targetPath = join(targetDir, `${name}.md`);
+    if (outcome === "no-frontmatter") {
+      // Nothing to edit — say so rather than rewriting the file unchanged and
+      // reporting success for a change that never happened.
+      ctx.ui.notify(`Cannot disable ${name}: ${file.path} has no frontmatter block.`, "error");
+      return;
+    }
     const { writeFileSync } = await import("node:fs");
-    writeFileSync(targetPath, "---\nenabled: false\n---\n", "utf-8");
+    writeFileSync(file.path, updated, "utf-8");
     reloadCustomAgents();
-    ctx.ui.notify(`Disabled ${name} (${targetPath})`, "info");
+    ctx.ui.notify(`Disabled ${name} (${file.path})`, "info");
   }
 
   /** Enable a disabled agent by removing enabled: false from its frontmatter. */
@@ -2414,24 +2333,16 @@ Terse command-style prompts produce shallow, generic work.
 
     const content = readFileSync(file.path, "utf-8");
     const { content: updated, changed } = enableInContent(content);
-    if (!changed && !isEmptyStub(updated)) {
+    if (!changed) {
       // The file carries no `enabled: false` to remove, so it was never disabled
       // by us — reporting success here would hide a no-op.
       ctx.ui.notify(`${name} is not disabled in ${file.path}.`, "info");
       return;
     }
     const { writeFileSync } = await import("node:fs");
-
-    // If the file was just a stub ("---\n---\n"), delete it to restore the built-in default
-    if (isEmptyStub(updated)) {
-      unlinkSync(file.path);
-      reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (removed ${file.path})`, "info");
-    } else {
-      writeFileSync(file.path, updated, "utf-8");
-      reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (${file.path})`, "info");
-    }
+    writeFileSync(file.path, updated, "utf-8");
+    reloadCustomAgents();
+    ctx.ui.notify(`Enabled ${name} (${file.path})`, "info");
   }
 
   async function showCreateWizard(ctx: ExtensionCommandContext) {
@@ -2635,7 +2546,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
       strictAgentFiles,
-      disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
       fleetView: isFleetViewEnabled(),
       agentMentions: getAgentMentionMode(),
@@ -2734,13 +2644,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
           label: "Strict agent files",
           description: "Fail startup on an unreadable/unparseable agent .md instead of skipping it with a warning",
           currentValue: strictAgentFiles ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "disableDefaultAgents",
-          label: "Disable defaults",
-          description: "Hide built-in agents (general-purpose, Explore, Plan) — custom agents are unaffected",
-          currentValue: isDefaultsDisabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -2859,10 +2762,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         strictAgentFiles = enabled;
         notifyApplied(ctx, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
-      } else if (id === "disableDefaultAgents") {
-        const enabled = value === "on";
-        setDisableDefaultAgents(enabled);
-        notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
       } else if (id === "fallbackSubagent") {
         setFallbackSubagent(value);
         notifyApplied(

@@ -2,10 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { serializeAgentFile } from "../src/agent-file-toggle.js";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
-import type { AgentConfig } from "../src/types.js";
 
 describe("loadCustomAgents", () => {
   let tmpDir: string;
@@ -1053,100 +1051,4 @@ Good body.`);
     }
   });
 
-  // `/agents → Eject` writes an AgentConfig back out as frontmatter. That writer
-  // and this loader are the two halves of one format, but nothing pinned them
-  // together — so a field can serialize to something the loader reads back
-  // differently, and the agent silently changes shape on eject.
-  describe("eject round-trip", () => {
-    function roundTrip(cfg: Partial<AgentConfig>) {
-      const full: AgentConfig = {
-        description: "Round trip agent",
-        systemPrompt: "Body prompt.",
-        promptMode: "append",
-        ...cfg,
-      } as AgentConfig;
-      writeAgent("rt", serializeAgentFile(full));
-      const loaded = loadCustomAgents(tmpDir).get("rt");
-      expect(loaded).toBeDefined();
-      return loaded!;
-    }
-
-    it("preserves an explicitly narrowed tool list", () => {
-      expect(roundTrip({ builtinToolNames: ["read", "grep"] }).builtinToolNames).toEqual(["read", "grep"]);
-    });
-
-    it("preserves the full built-in set", () => {
-      expect(roundTrip({ builtinToolNames: [...BUILTIN_TOOL_NAMES] }).builtinToolNames)
-        .toEqual([...BUILTIN_TOOL_NAMES]);
-    });
-
-    it("preserves an empty tool list instead of widening it to every built-in", () => {
-      // `tools: none` parses to [] on load, so ejecting an agent with zero
-      // built-ins must not write `tools: all` — that hands it the whole toolbox.
-      expect(roundTrip({ builtinToolNames: [] }).builtinToolNames).toEqual([]);
-    });
-
-    it("preserves the scalar and list fields it writes", () => {
-      const loaded = roundTrip({
-        displayName: "RT",
-        model: "anthropic/claude-haiku-4-5",
-        thinking: "low",
-        maxTurns: 7,
-        allowedSubagents: ["Explore"],
-        excludeExtensions: ["ext-beta"],
-        disallowedTools: ["write"],
-        inheritContext: true,
-        runInBackground: true,
-        outputTranscript: false,
-        isolated: true,
-        memory: "project",
-        isolation: "worktree",
-      });
-      expect(loaded.displayName).toBe("RT");
-      expect(loaded.model).toBe("anthropic/claude-haiku-4-5");
-      expect(loaded.thinking).toBe("low");
-      expect(loaded.maxTurns).toBe(7);
-      expect(loaded.allowedSubagents).toEqual(["Explore"]);
-      expect(loaded.excludeExtensions).toEqual(["ext-beta"]);
-      expect(loaded.disallowedTools).toEqual(["write"]);
-      expect(loaded.inheritContext).toBe(true);
-      expect(loaded.runInBackground).toBe(true);
-      expect(loaded.outputTranscript).toBe(false);
-      expect(loaded.isolated).toBe(true);
-      expect(loaded.memory).toBe("project");
-      expect(loaded.isolation).toBe("worktree");
-    });
-
-    it("preserves the extension and skill list fields", () => {
-      // These serialize as bare CSV and are re-parsed by parseExtensionsSpec /
-      // the skills field. A generate/parse mismatch here is silent: the ejected
-      // agent loads fine but with a different extension or skill scope than the
-      // one that was ejected.
-      const loaded = roundTrip({
-        extensions: ["mcp", "pi-notify"],
-        skills: ["planning", "review"],
-        disallowedTools: ["write", "edit"],
-      });
-      expect(loaded.extensions).toEqual(["mcp", "pi-notify"]);
-      expect(loaded.skills).toEqual(["planning", "review"]);
-      expect(loaded.disallowedTools).toEqual(["write", "edit"]);
-    });
-
-    it("preserves the boolean forms of extensions and skills", () => {
-      const off = roundTrip({ extensions: false, skills: false });
-      expect(off.extensions).toBe(false);
-      expect(off.skills).toBe(false);
-    });
-
-    it("preserves allowed_subagents in both its list and `all` forms", () => {
-      expect(roundTrip({ allowedSubagents: "all" }).allowedSubagents).toBe("all");
-      expect(roundTrip({ allowedSubagents: ["Explore", "Plan"] }).allowedSubagents)
-        .toEqual(["Explore", "Plan"]);
-    });
-
-    it("preserves a description containing a colon", () => {
-      // Serialized via JSON.stringify precisely so YAML doesn't split on the colon.
-      expect(roundTrip({ description: "Scout: find things" }).description).toBe("Scout: find things");
-    });
-  });
 });
