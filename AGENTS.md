@@ -21,6 +21,27 @@ Use `make <target>` for common tasks (test, lint, build, run) when a project has
 
 For multi-step work, track steps with the `todo` tool (add/toggle/list/clear) instead of only holding the plan in context. Keep it current as steps complete so `/todos` reflects real state.
 
+## Subagent delegation
+
+When a multi-step task has sequential, dependent steps (e.g. a todo list
+where step N needs step N-1's output), delegate one `Agent` call per
+checkpoint instead of one call for the whole plan.
+
+- Write each step's prompt from the **distilled result** of the previous
+  step (the specific facts it needs — a struct shape, a file path, a
+  decision) — never by pasting or inheriting the prior agent's full
+  transcript. Long, unfiltered context degrades a subagent's output quality
+  as it grows.
+- Foreground the call when the step depends on the prior step's result and
+  no independent work exists to fill the wait (the common case for
+  sequential chains). Background only when there's genuinely independent
+  work to do concurrently.
+- Batch multiple small, truly independent steps into one call only when
+  their combined context stays small — don't fan out a fresh agent per
+  trivial action.
+- Skip delegation entirely for single-file/quick-fix scope; spawn overhead
+  isn't worth it below that size.
+
 ## Grilling before building
 
 - Before implementing any non-trivial build or design change (new feature, redesign, architecture decision), apply the `grilling` skill first: interview me until the design tree is settled. Skip grilling for quick fixes, questions, investigations, and one-liner tasks.
@@ -28,6 +49,6 @@ For multi-step work, track steps with the `todo` tool (add/toggle/list/clear) in
 - Never implement during a grilling session until I confirm shared understanding.
 - After I confirm shared understanding, do not edit files yet. Present one four-option implementation gate:
   1. **Work** — work on the current session.
-  2. **Handoff** — prepare a fresh-session prompt using the installed `/handoff` flow.
+  2. **Handoff** — when running inside Herdr (`HERDR_ENV=1`), create a new tab in the current workspace and cwd, launch Pi there, wait for its intercom session, then send it a self-contained implementation prompt. Keep the original tab open and unfocused. If Herdr or intercom is unavailable, fall back to the installed `/handoff` flow.
   3. **Artifact** — uses the `/artifact` command, similar to `/handoff`, but creates the file.
   4. **Continue design** — ask whether to refine the plan or re-run grilling; make no implementation edits.
