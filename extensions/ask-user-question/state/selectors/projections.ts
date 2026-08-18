@@ -21,6 +21,8 @@ export const selectMultiSelectProps: PerTabSelector<MultiSelectViewProps> = (sta
 			},
 			nextActive: false,
 			nextLabel: LABELS_BY_KIND.next,
+			overflowMode: state.overflowMode,
+			tickerOffset: state.tickerOffset,
 		};
 	}
 	const focused = ctx.activeView === "options";
@@ -45,6 +47,8 @@ export const selectMultiSelectProps: PerTabSelector<MultiSelectViewProps> = (sta
 		},
 		nextActive,
 		nextLabel,
+		overflowMode: state.overflowMode,
+		tickerOffset: state.tickerOffset,
 	};
 };
 

@@ -34,6 +34,10 @@ export type QuestionnaireAction =
 	| { kind: "notes_forward"; data: string }
 	/** Flip `state.collapsed`. Always available, regardless of inner mode (see top intercept in `routeKey`). */
 	| { kind: "toggle_collapsed" }
+	/** Flip `state.overflowMode` between `expand` and `ticker` for the focused label. */
+	| { kind: "toggle_ticker" }
+	/** Advance `state.tickerOffset` one column. Emitted by the session's interval, not by a key. */
+	| { kind: "ticker_tick" }
 	| { kind: "ignore" };
 
 export interface QuestionnaireKeybindings {
@@ -256,6 +260,22 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 	// neither swallowed earlier nor blocked by `blocksMultiToggle`.
 	if (data === NOTES_ACTIVATE_KEY) {
 		return { kind: "notes_enter" };
+	}
+
+	// Ticker toggle. Deliberately routed HERE rather than at the top like the collapse key:
+	// the default spec is a bare `t`, so the notes / inputMode / submit blocks above must
+	// keep first claim on it and receive it as ordinary text. Gated on multi-select because
+	// that is the only list whose labels the ticker governs — single-select rows already wrap
+	// their labels in full — so `t` never starts a timer that could not change the frame.
+	// Same defensive `typeof` guard as the collapse key: a stale outer module can pass a
+	// non-string into `matchesKey`.
+	if (
+		q.multiSelect === true &&
+		typeof runtime.tickerKey === "string" &&
+		runtime.tickerKey !== "off" &&
+		matchesKey(data, runtime.tickerKey as Parameters<typeof matchesKey>[1])
+	) {
+		return { kind: "toggle_ticker" };
 	}
 
 	if (kb.matches(data, KEYBIND_UP)) {

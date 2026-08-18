@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, type Editor, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import type { OverflowMode } from "../config.js";
 import { sanitizeBlock } from "../tool/sanitize.js";
 import type { QuestionData, QuestionnaireResult, QuestionParams } from "../tool/types.js";
 import type { WrappingSelectItem } from "../view/components/wrapping-select.js";
@@ -21,15 +22,24 @@ export interface QuestionnaireSessionConfig {
 	editInput: (value: string) => Promise<string | undefined>;
 	/** Key spec for the collapse/expand shortcut, e.g. `"ctrl+]"` or `"alt+o"`. */
 	collapseKey: string;
+	/** Starting overflow presentation for focused option labels. */
+	overflow: OverflowMode;
+	/** Key spec toggling the ticker, e.g. `"t"`. `"off"` disables the toggle. */
+	tickerKey: string;
 }
 
 export interface QuestionnaireSessionComponent {
 	render(width: number): string[];
 	invalidate(): void;
 	handleInput(data: string): void;
+	/** Called by pi when the overlay closes. Stops the ticker interval. */
+	dispose?(): void;
 }
 
-function initialState(): QuestionnaireState {
+/** Ticker step. One column per tick reads as scrolling without a per-frame render storm. */
+export const TICKER_INTERVAL_MS = 200;
+
+function initialState(overflow: OverflowMode): QuestionnaireState {
 	return {
 		currentTab: 0,
 		optionIndex: 0,
@@ -42,6 +52,8 @@ function initialState(): QuestionnaireState {
 		submitChoiceIndex: 0,
 		notesDraft: "",
 		collapsed: false,
+		overflowMode: overflow,
+		tickerOffset: 0,
 	};
 }
 
@@ -52,7 +64,7 @@ function initialState(): QuestionnaireState {
  * the `QuestionnairePropsAdapter` produced by `buildQuestionnaire`.
  */
 export class QuestionnaireSession {
-	private state: QuestionnaireState = initialState();
+	private state: QuestionnaireState;
 
 	private readonly questions: readonly QuestionData[];
 	private readonly isMulti: boolean;
@@ -64,7 +76,9 @@ export class QuestionnaireSession {
 	private readonly keybindings: QuestionnaireRuntime["keybindings"];
 	private readonly editInput: QuestionnaireSessionConfig["editInput"];
 	private readonly collapseKey: string;
+	private readonly tickerKey: string;
 	private inputEditorOpen = false;
+	private tickerTimer: ReturnType<typeof setInterval> | undefined;
 
 	/**
 	 * Overlay handle captured by `ctx.ui.custom`'s `onHandle` callback. Lets the session
@@ -86,6 +100,8 @@ export class QuestionnaireSession {
 		this.keybindings = config.keybindings;
 		this.editInput = config.editInput;
 		this.collapseKey = config.collapseKey;
+		this.tickerKey = config.tickerKey;
+		this.state = initialState(config.overflow);
 
 		const built = buildQuestionnaire({
 			tui: this.tui,
@@ -115,9 +131,11 @@ export class QuestionnaireSession {
 			render: (width) => (this.state.collapsed ? collapsedRender(width) : built.render(width)),
 			invalidate: built.invalidate,
 			handleInput: (data) => this.dispatch(data),
+			dispose: () => this.stopTicker(),
 		};
 
 		this.viewAdapter.apply(this.state);
+		this.syncTicker();
 	}
 
 	dispatch(data: string): void {
@@ -136,6 +154,33 @@ export class QuestionnaireSession {
 		for (const effect of result.effects) this.runEffect(effect);
 		this.state = this.mirrorNotesDraft(this.state);
 		this.viewAdapter.apply(this.state);
+		this.syncTicker();
+	}
+
+	/**
+	 * Start/stop the ticker interval to match canonical state. Ticks go through `commit`
+	 * (reducer + props projection + `requestRender`) and deliberately NOT through
+	 * `viewAdapter.invalidate()`, which would drop the preview Markdown caches five times
+	 * a second. Idempotent, so `commit` can call it unconditionally.
+	 */
+	private syncTicker(): void {
+		const wanted = this.state.overflowMode === "ticker" && !this.state.collapsed;
+		if (wanted === (this.tickerTimer !== undefined)) return;
+		if (!wanted) {
+			this.stopTicker();
+			return;
+		}
+		// ponytail: the interval runs whenever ticker mode is on, even if the focused label
+		// happens to fit; gate it on measured overflow at the last rendered width if the idle
+		// re-render ever shows up in a profile.
+		this.tickerTimer = setInterval(() => this.commit({ kind: "ticker_tick" }), TICKER_INTERVAL_MS);
+		this.tickerTimer.unref?.();
+	}
+
+	private stopTicker(): void {
+		if (this.tickerTimer === undefined) return;
+		clearInterval(this.tickerTimer);
+		this.tickerTimer = undefined;
 	}
 
 	private mirrorNotesDraft(s: QuestionnaireState): QuestionnaireState {
@@ -182,6 +227,7 @@ export class QuestionnaireSession {
 				this.overlayHandle?.setHidden(effect.hidden);
 				return;
 			case "done":
+				this.stopTicker();
 				this.done(effect.result);
 				return;
 		}
@@ -212,6 +258,7 @@ export class QuestionnaireSession {
 			currentItem: this.currentItem(),
 			items: this.itemsByTab[this.state.currentTab] ?? [],
 			collapseKey: this.collapseKey,
+			tickerKey: this.tickerKey,
 		};
 	}
 

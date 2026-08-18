@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { OverflowMode } from "../../config.js";
 import { LABELS_BY_KIND } from "../../state/row-intent.js";
 import type { QuestionData } from "../../tool/types.js";
 import type { StatefulView } from "../stateful-view.js";
@@ -17,6 +18,27 @@ const CONTINUATION_INDENT = "  ";
 
 export const MULTI_SUBMIT_LABEL = "Submit";
 
+/** Gap drawn between the end of a looping label and its repeat. */
+export const TICKER_SEPARATOR = "   \u2022   ";
+
+/**
+ * One ticker frame of `text` at `offset` columns. Labels that already fit are returned
+ * unscrolled, so the ticker is a no-op on short options.
+ *
+ * The loop unit is `text + separator`; two copies are concatenated so a window starting
+ * anywhere inside the first copy always has a full window of columns behind it. Slicing
+ * goes through pi-tui's `sliceByColumn` (ANSI- and grapheme-aware, `strict` so a
+ * double-width grapheme straddling an edge is not half-emitted) rather than JS indices.
+ */
+export function tickerSlice(text: string, width: number, offset: number): string {
+	if (width <= 0) return "";
+	if (visibleWidth(text) <= width) return truncateToWidth(text, width, "…");
+	const loop = `${text}${TICKER_SEPARATOR}`;
+	const period = visibleWidth(loop);
+	const start = ((offset % period) + period) % period;
+	return sliceByColumn(`${loop}${loop}`, start, width, true);
+}
+
 export interface MultiSelectOtherRowProps {
 	/** The "Type something." row is the focused row (optionIndex === options.length). */
 	active: boolean;
@@ -32,6 +54,10 @@ export interface MultiSelectViewProps {
 	other: MultiSelectOtherRowProps;
 	nextActive: boolean;
 	nextLabel: string;
+	/** `expand` wraps the focused label onto extra rows; `ticker` scrolls it on one row. */
+	overflowMode: OverflowMode;
+	/** Column offset for the ticker frame. Ignored in `expand` mode. */
+	tickerOffset: number;
 }
 
 /**
@@ -63,6 +89,8 @@ export class MultiSelectView implements StatefulView<MultiSelectViewProps> {
 			other: { active: false, inputMode: false, inputBuffer: "", inputCursorOffset: undefined },
 			nextActive: false,
 			nextLabel: LABELS_BY_KIND.next,
+			overflowMode: "expand",
+			tickerOffset: 0,
 		};
 	}
 
@@ -89,6 +117,44 @@ export class MultiSelectView implements StatefulView<MultiSelectViewProps> {
 		return this.layout(width).lines.length;
 	}
 
+	/**
+	 * Worst-case height across every focus position at this width. Only the FOCUSED
+	 * authored label expands, so the worst case is the current layout with its focused
+	 * label's extra rows swapped for the widest label's extra rows. Reserving this keeps
+	 * the dialog footprint stable while the user navigates between long and short labels.
+	 */
+	maxNaturalHeight(width: number): number {
+		const contentWidth = Math.max(1, width - this.prefixVisibleWidth());
+		let focusedExtra = 0;
+		let maxExtra = 0;
+		for (let i = 0; i < this.question.options.length; i++) {
+			const extra = this.labelExtraRows(i, contentWidth);
+			if (extra > maxExtra) maxExtra = extra;
+			if (this.props.rows[i]?.active) focusedExtra = extra;
+		}
+		return this.naturalHeight(width) - focusedExtra + maxExtra;
+	}
+
+	/** Extra rows option `i`'s label would consume if it were focused. Always 0 in ticker mode. */
+	private labelExtraRows(index: number, contentWidth: number): number {
+		const label = this.question.options[index]?.label;
+		if (!label || this.props.overflowMode === "ticker") return 0;
+		return Math.max(0, wrapTextWithAnsi(label, contentWidth).length - 1);
+	}
+
+	/**
+	 * Rows for one authored label. Unfocused labels stay clipped to a single row so the list
+	 * reads as a column; the focused label is the only one allowed to grow (expand) or move
+	 * (ticker).
+	 */
+	private labelRows(label: string, active: boolean, contentWidth: number): string[] {
+		if (!active) return [truncateToWidth(label, contentWidth, "…")];
+		if (this.props.overflowMode === "ticker") {
+			return [tickerSlice(label, contentWidth, this.props.tickerOffset)];
+		}
+		return wrapTextWithAnsi(label, contentWidth);
+	}
+
 	private layout(width: number): MultiSelectLayout {
 		if (this.cachedLayout?.width === width) return this.cachedLayout.value;
 
@@ -104,12 +170,13 @@ export class MultiSelectView implements StatefulView<MultiSelectViewProps> {
 			const pointer = row.active ? this.theme.fg("accent", ACTIVE_POINTER) : INACTIVE_POINTER;
 			// Checked and active rows share the accent hue, matching the dialog's selection rhythm.
 			const box = row.checked ? this.theme.fg("accent", CHECKED) : this.theme.fg("muted", UNCHECKED);
-			const label = truncateToWidth(opt.label, contentWidth, "…");
-			const styledLabel = row.active ? this.theme.fg("accent", this.theme.bold(label)) : label;
+			const [head = "", ...rest] = this.labelRows(opt.label, row.active, contentWidth);
+			const style = (text: string) => (row.active ? this.theme.fg("accent", this.theme.bold(text)) : text);
 			const number = String(i + 1).padStart(numberWidth, " ");
 			lines.push(
-				truncateToWidth(`${pointer}${number}${NUMBER_SEPARATOR}${box}${BOX_LABEL_GAP}${styledLabel}`, width, ""),
+				truncateToWidth(`${pointer}${number}${NUMBER_SEPARATOR}${box}${BOX_LABEL_GAP}${style(head)}`, width, ""),
 			);
+			for (const segment of rest) lines.push(CONTINUATION_INDENT + style(segment));
 			if (opt.description) {
 				for (const segment of wrapTextWithAnsi(opt.description, contentWidth)) {
 					lines.push(CONTINUATION_INDENT + this.theme.fg("muted", segment));

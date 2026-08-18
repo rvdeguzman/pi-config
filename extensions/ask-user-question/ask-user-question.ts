@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
-import { loadConfig, resolveCollapseKey, validateGuidanceFields } from "./config.js";
+import { loadConfig, resolveCollapseKey, resolveOverflow, resolveTickerKey, validateGuidanceFields } from "./config.js";
 import {
 	ASK_USER_BLOCKED_EVENT,
 	ASK_USER_PROMPT_EVENT,
@@ -227,7 +227,12 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			// with non-US layouts (e.g. Latin American, where `]` is shifted) can override
 			// via the `collapseKey` config field. `resolveCollapseKey` also accepts the
 			// sentinel value `"off"` to disable the shortcut entirely.
-			const collapseKey = resolveCollapseKey(loadConfig());
+			const runtimeConfig = loadConfig();
+			const collapseKey = resolveCollapseKey(runtimeConfig);
+			// Label-overflow presentation: `expand` (default) wraps the focused label; `tickerKey`
+			// flips to the scrolling ticker at runtime. Both fall back on malformed config values.
+			const overflow = resolveOverflow(runtimeConfig);
+			const tickerKey = resolveTickerKey(runtimeConfig);
 
 			// Capture the overlay handle so the session can call `setHidden()` when the
 			// user toggles collapse, and register a raw terminal input listener for the
@@ -295,6 +300,8 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 								}
 							},
 							collapseKey,
+							overflow,
+							tickerKey,
 						});
 						sessionRef.current = session;
 						return session.component;

@@ -1,3 +1,4 @@
+import type { OverflowMode } from "../config.js";
 import type { QuestionAnswer, QuestionData } from "../tool/types.js";
 import type { WrappingSelectItem } from "../view/components/wrapping-select.js";
 
@@ -33,6 +34,15 @@ export interface QuestionnaireState {
 	 * instead of calling `OverlayHandle.setHidden(true)`.
 	 */
 	collapsed: boolean;
+	/**
+	 * How the focused option label presents overflow. Seeded from config (`overflow`) and
+	 * flipped at runtime by the ticker key. `expand` wraps the focused label onto extra rows;
+	 * `ticker` keeps it on one row and scrolls it. Preview panes are unaffected — their
+	 * Markdown already wraps at the pane width in both modes.
+	 */
+	overflowMode: OverflowMode;
+	/** Monotonic ticker column offset. Advanced by `ticker_tick`; reset on nav/tab-switch/toggle. */
+	tickerOffset: number;
 }
 
 /**
@@ -54,4 +64,6 @@ export interface QuestionnaireRuntime {
 	 * the collapse shortcut is disabled.
 	 */
 	collapseKey: string;
+	/** Key spec toggling `overflowMode`, e.g. `"t"`. When `"off"`, the toggle is disabled. */
+	tickerKey: string;
 }

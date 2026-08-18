@@ -127,6 +127,7 @@ function switchTabResult(state: QuestionnaireState, nextTab: number, ctx: ApplyC
 		submitChoiceIndex: 0,
 		multiSelectChecked: syncMultiSelectFromAnswers(state.answers, ctx.questions, nextTab),
 		notesDraft: notesValue,
+		tickerOffset: 0,
 	};
 	return {
 		state: transitioned,
@@ -160,7 +161,14 @@ const navHandler: Handler<"nav"> = (state, action, ctx) => {
 	const customDraftsByTab = state.inputMode
 		? setCustomDraft(state, state.currentTab, action.inputValue)
 		: state.customDraftsByTab;
-	const next: QuestionnaireState = { ...state, optionIndex: action.nextIndex, inputMode, customDraftsByTab };
+	// Offset resets on nav so a newly focused label starts from its first column.
+	const next: QuestionnaireState = {
+		...state,
+		optionIndex: action.nextIndex,
+		inputMode,
+		customDraftsByTab,
+		tickerOffset: 0,
+	};
 	if (!inputMode) return { state: next, effects: [] };
 	return {
 		state: next,
@@ -293,6 +301,14 @@ const toggleCollapsedHandler: Handler<"toggle_collapsed"> = (s, _a, _c) => ({
 	state: { ...s, collapsed: !s.collapsed },
 	effects: [{ kind: "set_overlay_hidden", hidden: !s.collapsed }],
 });
+const toggleTickerHandler: Handler<"toggle_ticker"> = (s, _a, _c) => ({
+	state: { ...s, overflowMode: s.overflowMode === "ticker" ? "expand" : "ticker", tickerOffset: 0 },
+	effects: [],
+});
+const tickerTickHandler: Handler<"ticker_tick"> = (s, _a, _c) => ({
+	state: { ...s, tickerOffset: s.tickerOffset + 1 },
+	effects: [],
+});
 const ignoreHandler: Handler<"ignore"> = (s, _a, _c) => ({ state: s, effects: [] });
 
 /**
@@ -317,6 +333,8 @@ const HANDLERS: { [K in QuestionnaireAction["kind"]]: Handler<K> } = {
 	submit: submitHandler,
 	submit_nav: submitNavHandler,
 	toggle_collapsed: toggleCollapsedHandler,
+	toggle_ticker: toggleTickerHandler,
+	ticker_tick: tickerTickHandler,
 	ignore: ignoreHandler,
 };
 

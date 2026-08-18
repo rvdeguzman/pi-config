@@ -43,6 +43,7 @@ When the model asks several things at once, `Tab` moves between them and a Submi
 - **One interruption, not five** — up to four questions arrive in a single tabbed dialog, and the Submit tab lists your answers and names anything still blank before you commit.
 - **Notes on any answer** — `n` opens a multiline note editor on any question tab; the note travels back to the model alongside the choice without marking the question answered.
 - **Read the transcript behind the dialog** — `Ctrl+]` collapses the overlay so you can scroll the conversation, then brings it back with your answers intact.
+- **Long multi-select labels stay readable** — the focused label wraps onto as many rows as it needs, and `t` flips it to a one-row ticker that scrolls it instead. The dialog reserves the worst-case height up front, so navigating between long and short labels never makes it jump.
 - **Works outside the terminal too** — in RPC and ACP hosts such as the VS Code pendant or Zed the questionnaire walks through the host's native dialogs, and in non-interactive runs the tool is removed from the model's tool list instead of failing every call.
 
 ## Configuration
@@ -52,13 +53,17 @@ Optional. Settings live in `~/.config/rpiv-ask-user-question/config.json`; the f
 | Setting | What it does | Default |
 | --- | --- | --- |
 | `collapseKey` | Key that collapses and expands the dialog. Accepts Pi keybinding ids such as `alt+o`; `"off"` disables the shortcut. | `"ctrl+]"` |
+| `overflow` | How a focused multi-select label wider than its column is shown: `"expand"` wraps it onto extra rows, `"ticker"` scrolls it on one row. | `"expand"` |
+| `tickerKey` | Key that switches the focused label between `expand` and `ticker`. Same grammar as `collapseKey`; `"off"` disables the toggle. Only active on question tabs, so it stays typable inside notes and custom answers. | `"t"` |
 | `guidance.description` | Full replacement for the tool description the model sees. A non-empty string replaces the built-in text entirely — no merging. | built-in description |
 | `guidance.promptSnippet` | One-line description of the tool in the system prompt — tune how eagerly the model asks. | built-in snippet |
 | `guidance.promptGuidelines` | Usage guidelines given to the model, as a list of strings. | 4 built-in guidelines |
 
 ```json
-{ "collapseKey": "alt+o" }
+{ "collapseKey": "alt+o", "overflow": "ticker", "tickerKey": "off" }
 ```
+
+The ticker only animates the focused multi-select label; preview panes wrap their markdown at the pane width in both modes, and the dialog chrome never animates. The 200ms timer runs only while ticker mode is on and stops when you switch back, collapse, or close the dialog.
 
 Malformed JSON falls back to the defaults with a warning; an individual unusable value is silently dropped back to its default. Never an error.
 

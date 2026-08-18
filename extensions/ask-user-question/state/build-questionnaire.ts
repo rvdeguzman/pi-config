@@ -76,10 +76,10 @@ function editorTheme(theme: Theme): EditorTheme {
 }
 
 function multiSelectBodyHeights(view: MultiSelectView): (width: number) => TabBodyHeights {
-	return (width) => {
-		const h = view.naturalHeight(width);
-		return { current: h, max: h };
-	};
+	// `max` is the worst case across focus positions, not the current one: the focused label
+	// expands in `expand` mode, so reserving only the current height would make the dialog
+	// grow and shrink as the user navigates between long and short labels.
+	return (width) => ({ current: view.naturalHeight(width), max: view.maxNaturalHeight(width) });
 }
 
 const isActiveTab: PerTabSelector<boolean> = (s, ctx) =>
