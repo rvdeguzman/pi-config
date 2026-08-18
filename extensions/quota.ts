@@ -184,7 +184,9 @@ export default function (pi: ExtensionAPI) {
 				? () => cached("cc", claudeWindows)
 				: provider === "openai-codex"
 					? () => cached("cx", codexWindows)
-					: undefined;
+					: provider === "kimi-coding"
+						? () => cached("k3", kimiWindows)
+						: undefined;
 		if (!source) {
 			lastWins = [];
 			ctx.ui.setStatus("quota", undefined);
