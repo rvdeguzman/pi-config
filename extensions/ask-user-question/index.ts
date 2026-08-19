@@ -219,6 +219,7 @@ function appendWrapped(lines: string[], prefix: string, text: string, width: num
 	}
 }
 
+const CONTENT_INDENT = "  ";
 const COLLAPSE_KEY = Key.ctrl("]");
 const RESERVED_EDITOR_ROWS = 5; // Widget spacer + Pi editor minimum + minimal footer.
 
@@ -612,14 +613,21 @@ export class Questionnaire {
 
 	private render(width: number) {
 		const w = Math.max(0, width);
+		const inner = Math.max(1, w - visibleWidth(CONTENT_INDENT));
 		const divider = "─".repeat(w);
 		const lines: string[] = [divider];
 		this.activeLine = 1;
-		if (this.hasReview) this.renderTabs(lines, w);
-		if (this.currentTab === this.config.questions.length) this.renderReview(lines, w);
-		else this.renderQuestion(lines, w);
+		if (this.hasReview) this.renderTabs(lines, inner);
+		if (this.currentTab === this.config.questions.length) this.renderReview(lines, inner);
+		else this.renderQuestion(lines, inner);
+		const bodyEnd = lines.length;
 		lines.push(divider);
-		return this.fitHeight(lines.map((line) => truncateToWidth(line, w, "")));
+		return this.fitHeight(
+			lines.map((line, index) => {
+				const indented = index > 0 && index < bodyEnd && line.length > 0 ? `${CONTENT_INDENT}${line}` : line;
+				return truncateToWidth(indented, w, "");
+			}),
+		);
 	}
 
 	private fitHeight(lines: string[]) {
