@@ -162,6 +162,21 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
+  it("round-trips defaultMaxDuration RAW (string or seconds); drops garbage", () => {
+    // Stored raw, never converted to ms: a converted "10m" → 600000 would be
+    // re-read as 600000 SECONDS on the next load and blow the 24h ceiling.
+    saveSettings({ defaultMaxDuration: "10m" }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ defaultMaxDuration: "10m" });
+    saveSettings({ defaultMaxDuration: 300 }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ defaultMaxDuration: 300 });
+    saveSettings({ defaultMaxDuration: 0 }, projectDir); // 0 = deadline off
+    expect(loadSettings(projectDir)).toEqual({ defaultMaxDuration: 0 });
+    writeProject({ defaultMaxDuration: "soon" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // unparseable dropped
+    writeProject({ defaultMaxDuration: true } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // wrong type dropped
+  });
+
   it("round-trips worktreeIsolation; drops non-boolean", () => {
     saveSettings({ worktreeIsolation: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: false });
@@ -444,6 +459,7 @@ describe("settings persistence", () => {
       appliers = {
         setMaxConcurrent: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
+        setDefaultMaxDuration: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
@@ -470,6 +486,15 @@ describe("settings persistence", () => {
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
       expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
+    });
+
+    it("applies defaultMaxDuration in ms, with 0 mapping to unlimited", () => {
+      applySettings({ defaultMaxDuration: "10m" }, appliers);
+      expect(appliers.setDefaultMaxDuration).toHaveBeenCalledWith(600_000);
+      applySettings({ defaultMaxDuration: 0 }, appliers);
+      expect(appliers.setDefaultMaxDuration).toHaveBeenCalledWith(0);
+      applySettings({}, appliers);
+      expect(appliers.setDefaultMaxDuration).toHaveBeenCalledTimes(2);
     });
 
     it("applies fallbackSubagent through to the registry", () => {
@@ -626,6 +651,7 @@ describe("settings persistence", () => {
       appliers = {
         setMaxConcurrent: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
+        setDefaultMaxDuration: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),

@@ -1,50 +1,49 @@
-// README:142 promises the transcript root is owner-only `0700`. Transcripts
-// hold the agent's full conversation — user prompts, file contents, tool output —
-// in a shared temp dir, so that mode is the only thing keeping them from every
-// other local user. `createOutputFilePath` is mocked in the one wiring test that
-// touches it, so this body had never actually executed under test.
+// README promises the transcript root is owner-only `0700`. Transcripts hold
+// the agent's full conversation — user prompts, file contents, tool output —
+// so that mode is the only thing keeping them from other local users.
 //
-// This lives in its own file because it must mock `node:os`. The real root is
-// `<os-tmpdir>/pi-subagents-<uid>` — one path shared by every worker AND by the
-// e2e suites that spawn real agents. Mutating it directly makes the test race
-// against anything else writing a transcript (observed: passes alone, fails
-// intermittently in the full run). Redirecting `tmpdir()` gives each run its own
-// root and removes the shared state entirely.
+// The root moved from `<os-tmpdir>/pi-subagents-<uid>` to
+// `<agentDir>/subagent-runs`: tmpdir() reaping destroyed the one artifact that
+// could explain a bad run (the motivating incident was a 37-minute worker
+// whose transcript was gone by the time anyone looked). No uid suffix anymore —
+// the agent dir is already per-user. Durability's price is that nothing
+// external ages transcripts out, which is `pruneOutputFiles`' job, tested here.
+//
+// Each test redirects the agent dir via PI_CODING_AGENT_DIR (evaluated per
+// call by pi's getAgentDir) so runs never share state with real transcripts
+// or the e2e suites.
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
-import { tmpdir as realTmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const fakeTmp = vi.hoisted(() => ({ dir: "" }));
+import { createOutputFilePath, pruneOutputFiles } from "../src/output-file.js";
 
-vi.mock("node:os", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, tmpdir: () => fakeTmp.dir || actual.tmpdir() };
-});
-
-import { createOutputFilePath } from "../src/output-file.js";
-
-const UID = process.getuid?.() ?? 0;
 const AGENT = "agent-xyz";
 const SESSION = "session-123";
 
+let tmpAgentDir: string;
+let root: string;
+let originalEnv: string | undefined;
+
+beforeEach(() => {
+  // realpath: macOS resolves /var → /private/var, and the module joins the
+  // raw value, so comparisons must use the same form.
+  tmpAgentDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-outpath-")));
+  originalEnv = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = tmpAgentDir;
+  root = join(tmpAgentDir, "subagent-runs");
+});
+
+afterEach(() => {
+  if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalEnv;
+  rmSync(tmpAgentDir, { recursive: true, force: true });
+});
+
 describe("createOutputFilePath", () => {
-  let root: string;
-
-  beforeEach(() => {
-    // realpath: macOS resolves /var → /private/var, and the module joins the
-    // raw tmpdir() value, so comparisons must use the same form.
-    fakeTmp.dir = realpathSync(mkdtempSync(join(realTmpdir(), "pi-outpath-")));
-    root = join(fakeTmp.dir, `pi-subagents-${UID}`);
-  });
-
-  afterEach(() => {
-    rmSync(fakeTmp.dir, { recursive: true, force: true });
-    fakeTmp.dir = "";
-  });
-
-  it("builds the documented layout: <root>/<encoded-cwd>/<session>/tasks/<agent>.output", () => {
+  it("builds the documented layout: <agentDir>/subagent-runs/<encoded-cwd>/<session>/tasks/<agent>.output", () => {
     const path = createOutputFilePath("/home/user/project", AGENT, SESSION);
     expect(path).toBe(join(root, "home-user-project", SESSION, "tasks", `${AGENT}.output`));
   });
@@ -58,9 +57,9 @@ describe("createOutputFilePath", () => {
   it("keeps distinct cwds in separate subdirectories under the shared root", () => {
     const a = createOutputFilePath("/home/user/project", AGENT, SESSION);
     const b = createOutputFilePath("/home/user/other", "agent-2", SESSION);
-    expect(a).toContain("home-user-project");
-    expect(b).toContain("home-user-other");
     expect(a).not.toBe(b);
+    expect(a.startsWith(root)).toBe(true);
+    expect(b.startsWith(root)).toBe(true);
   });
 
   it.skipIf(process.platform === "win32")("creates the root owner-only", () => {
@@ -69,18 +68,56 @@ describe("createOutputFilePath", () => {
   });
 
   it.skipIf(process.platform === "win32")("re-tightens a pre-existing world-readable root", () => {
-    // The case the explicit chmod exists for. `mkdirSync(recursive: true)` does
-    // NOT alter an existing directory's mode, so a root left behind by an older
-    // version — or created by anything else under a permissive umask — would
-    // keep its wide permissions and every transcript written into it would be
-    // readable by every local user. (mkdir's own `mode: 0o700` cannot cover
-    // this: umask only clears bits, so a fresh mkdir is never too permissive.)
-    mkdirSync(root, { recursive: true, mode: 0o755 });
-    chmodSync(root, 0o755); // defeat umask so the premise really holds
-    expect(statSync(root).mode & 0o777).toBe(0o755);
+    mkdirSync(root, { recursive: true });
+    chmodSync(root, 0o755);
 
     createOutputFilePath("/home/user/project", AGENT, SESSION);
 
     expect(statSync(root).mode & 0o777).toBe(0o700);
+  });
+});
+
+describe("pruneOutputFiles", () => {
+  const DAY_MS = 24 * 3_600_000;
+
+  /** Create a transcript and backdate its mtime by `ageDays`. */
+  function plantTranscript(cwd: string, agentId: string, sessionId: string, ageDays: number): string {
+    const path = createOutputFilePath(cwd, agentId, sessionId);
+    writeFileSync(path, "{}\n", "utf-8");
+    const then = new Date(Date.now() - ageDays * DAY_MS);
+    utimesSync(path, then, then);
+    return path;
+  }
+
+  it("removes transcripts older than the max age and their emptied directories", () => {
+    const old = plantTranscript("/home/user/project", "old-agent", "old-session", 20);
+
+    pruneOutputFiles(14 * DAY_MS);
+
+    expect(existsSync(old)).toBe(false);
+    // The whole emptied chain goes: tasks/, session/, encoded-cwd/.
+    expect(existsSync(join(root, "home-user-project"))).toBe(false);
+  });
+
+  it("keeps transcripts younger than the max age", () => {
+    const fresh = plantTranscript("/home/user/project", "fresh-agent", "fresh-session", 2);
+
+    pruneOutputFiles(14 * DAY_MS);
+
+    expect(existsSync(fresh)).toBe(true);
+  });
+
+  it("keeps a directory that still holds a fresh transcript while removing the stale sibling", () => {
+    const old = plantTranscript("/home/user/project", "old-agent", SESSION, 20);
+    const fresh = plantTranscript("/home/user/project", "fresh-agent", SESSION, 1);
+
+    pruneOutputFiles(14 * DAY_MS);
+
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+  });
+
+  it("is a no-op when the root does not exist", () => {
+    expect(() => pruneOutputFiles()).not.toThrow();
   });
 });

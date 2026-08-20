@@ -5,10 +5,9 @@
  * matching Claude Code's task output file format.
  */
 
-import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, chmodSync, mkdirSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, type AgentSessionEvent, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /**
  * Project/global default for writing a subagent's `.output` transcript; a custom
@@ -37,11 +36,23 @@ export function encodeCwd(cwd: string): string {
     .replace(/^-+/, "");           // strip leading dashes (POSIX root, UNC)
 }
 
+/**
+ * Transcript root: `<agentDir>/subagent-runs`, NOT the OS temp dir. The
+ * motivating incident's 37-minute worker transcript went to tmpdir() and the
+ * OS reaped it — the one artifact that could explain a bad run has to survive
+ * longer than /tmp does. No uid suffix: the agent dir is already per-user.
+ * Nothing reaps this location, so `pruneOutputFiles` (called at extension
+ * startup) ages runs out after 14 days instead.
+ */
+export function outputFilesRoot(): string {
+  return join(getAgentDir(), "subagent-runs");
+}
+
 /** Create the output file path, ensuring the directory exists.
- *  Mirrors Claude Code's layout: /tmp/{prefix}-{uid}/{encoded-cwd}/{sessionId}/tasks/{agentId}.output */
+ *  Mirrors Claude Code's layout: {root}/{encoded-cwd}/{sessionId}/tasks/{agentId}.output */
 export function createOutputFilePath(cwd: string, agentId: string, sessionId: string): string {
   const encoded = encodeCwd(cwd);
-  const root = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
+  const root = outputFilesRoot();
   mkdirSync(root, { recursive: true, mode: 0o700 });
   // chmod is a no-op on Windows and throws on some Windows filesystems.
   // On Unix we still want to enforce 0o700 past umask, so only swallow on Windows.
@@ -53,6 +64,44 @@ export function createOutputFilePath(cwd: string, agentId: string, sessionId: st
   const dir = join(root, encoded, sessionId, "tasks");
   mkdirSync(dir, { recursive: true });
   return join(dir, `${agentId}.output`);
+}
+
+/** Transcripts older than this are pruned at startup. */
+const PRUNE_MAX_AGE_MS = 14 * 24 * 3_600_000;
+
+/**
+ * Age out old transcripts. tmpdir() came with free (if hostile) cleanup; the
+ * agent-dir location has none, so this runs once at extension startup.
+ * Best-effort throughout — a prune failure must never block activation. The
+ * walk follows the fixed {root}/{encoded-cwd}/{sessionId}/tasks/*.output
+ * layout rather than a recursive readdir, and removes directories only once
+ * empty (rmdirSync refuses non-empty ones, which is exactly the guard needed).
+ */
+export function pruneOutputFiles(maxAgeMs: number = PRUNE_MAX_AGE_MS): void {
+  const cutoff = Date.now() - maxAgeMs;
+  const list = (dir: string): string[] => {
+    try { return readdirSync(dir); } catch { return []; }
+  };
+  const rmdirIfEmpty = (dir: string): void => {
+    try { rmdirSync(dir); } catch { /* non-empty or gone — both fine */ }
+  };
+  const root = outputFilesRoot();
+  for (const cwdName of list(root)) {
+    const cwdDir = join(root, cwdName);
+    for (const sessionName of list(cwdDir)) {
+      const sessionDir = join(cwdDir, sessionName);
+      const tasksDir = join(sessionDir, "tasks");
+      for (const file of list(tasksDir)) {
+        const filePath = join(tasksDir, file);
+        try {
+          if (statSync(filePath).mtimeMs < cutoff) unlinkSync(filePath);
+        } catch { /* raced or unreadable — skip */ }
+      }
+      rmdirIfEmpty(tasksDir);
+      rmdirIfEmpty(sessionDir);
+    }
+    rmdirIfEmpty(cwdDir);
+  }
 }
 
 /**

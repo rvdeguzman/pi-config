@@ -7,6 +7,7 @@ tools: read, grep, find, ls, bash
 model: [anthropic/claude-sonnet-5, kimi-coding/k3, openai-codex/gpt-5.6-luna]
 thinking: low
 prompt_mode: replace
+max_duration: 5m
 ---
 
 # READ-ONLY — NO FILE MODIFICATIONS

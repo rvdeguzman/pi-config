@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
+import { parseDuration } from "./deadline.js";
 import type { AgentMentionMode, JoinMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
@@ -16,6 +17,14 @@ export interface SubagentsSettings {
    * `/agents` → Settings input prompt explicitly says "0 = unlimited".
    */
   defaultMaxTurns?: number;
+  /**
+   * Default wall-clock budget per agent run, when the agent's own
+   * `max_duration:` frontmatter doesn't set one. A string with a unit ("10m",
+   * "90s", "1h") or a number of seconds; `0` disables the deadline. Stored
+   * raw (not converted to ms) so a save/load round-trip can't reinterpret the
+   * unit. Built-in default: 10 minutes.
+   */
+  defaultMaxDuration?: number | string;
   graceTurns?: number;
   defaultJoinMode?: JoinMode;
   /**
@@ -182,6 +191,7 @@ export type ToolDescriptionMode = "full" | "compact" | "custom";
 export interface SettingsAppliers {
   setMaxConcurrent: (n: number) => void;
   setDefaultMaxTurns: (n: number) => void;
+  setDefaultMaxDuration: (ms: number | undefined) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
   setSchedulingEnabled: (b: boolean) => void;
@@ -232,6 +242,14 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.defaultMaxTurns as number) <= MAX_TURNS_CEILING
   ) {
     out.defaultMaxTurns = r.defaultMaxTurns as number;
+  }
+  // Valid iff parseDuration accepts it — but stored RAW: converting "10m" to
+  // 600000 here would make the next load read that number as seconds.
+  if (
+    (typeof r.defaultMaxDuration === "number" || typeof r.defaultMaxDuration === "string") &&
+    parseDuration(r.defaultMaxDuration) !== undefined
+  ) {
+    out.defaultMaxDuration = r.defaultMaxDuration;
   }
   if (
     Number.isInteger(r.graceTurns) &&
@@ -346,6 +364,7 @@ export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()):
 export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers): void {
   if (typeof s.maxConcurrent === "number") appliers.setMaxConcurrent(s.maxConcurrent);
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
+  if (s.defaultMaxDuration !== undefined) appliers.setDefaultMaxDuration(parseDuration(s.defaultMaxDuration));
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
   if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);

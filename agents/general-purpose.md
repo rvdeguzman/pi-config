@@ -3,6 +3,7 @@ description: "General-purpose agent for researching complex questions, searching
 display_name: Agent
 tools: all
 prompt_mode: append
+max_duration: 10m
 ---
 
 

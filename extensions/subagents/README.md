@@ -25,6 +25,8 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
 - **Session resume** — pick up where an agent left off, preserving full conversation context. Resumes in the foreground by default, or pass `run_in_background: true` to resume detached and be notified on completion, just like a background spawn
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
+- **Wall-clock deadlines** — every run carries a time budget (per-agent `max_duration:` frontmatter, default 10m): a wrap-up steer at the budget, a hard abort 90s later even mid-tool-call. Catches productive loops that turn counts miss; a deadline kill reports with explicit non-retry framing. Human steers reset the clock; nested children are clamped to their parent's remaining time
+- **Flight recorder** — abnormal exits (stopped/aborted/error) report what the agent DID — files written, commands run with failure counts, last 30 tool calls — not just its last words, so a stopped run never again reads "No output." while its work sits in the files it touched
 - **Case-insensitive agent types** — `"explore"`, `"Explore"`, `"EXPLORE"` all work. A type that doesn't resolve to exactly one *enabled* agent — unknown, disabled, or ambiguous between two agents differing only by case — falls back to general-purpose with a note, or is refused outright under [`fallbackSubagent: none`](#persistent-settings)
 - **Fuzzy model selection** — specify models by name (`"haiku"`, `"sonnet"`) instead of full IDs, with automatic filtering to only available/configured models
 - **Context inheritance** — optionally fork the parent conversation into a sub-agent so it knows what's been discussed
@@ -215,13 +217,13 @@ Individual agent results render Claude Code-style in the conversation:
 
 Completed results can be expanded (ctrl+o in pi) to show the full agent output inline.
 
-By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot). Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as styled boxes:
+By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file at `<agentDir>/subagent-runs/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`; runs older than 14 days are pruned at extension startup). The root is the agent dir, not the OS temp dir, so the transcript that explains a bad run survives tmp reaping and reboots. Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as styled boxes:
 
 ```
 ✓ Find auth files completed
   ↻3 · 3 tool uses · 12.4k token · 4.1s
   ⎿  Found 5 files related to authentication...
-  transcript: /tmp/pi-subagents-501/home-user-project/sess-1/tasks/agent-abc123.output
+  transcript: ~/.pi/agent/subagent-runs/home-user-project/sess-1/tasks/agent-abc123.output
 ```
 
 Group completions render each agent as a separate block. The LLM receives structured `<task-notification>` XML for parsing, while the user sees the themed visual.
@@ -301,6 +303,7 @@ All fields are optional — sensible defaults for everything.
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). A YAML array or comma-separated value is a fallback chain, tried left to right. Resolved tolerantly (`.`/`-` and a trailing date stamp are interchangeable) and falls back to the same model under another provider if the named one doesn't have it |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh, max — actual availability depends on your pi version and model; pi clamps unsupported levels down |
 | `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
+| `max_duration` | `defaultMaxDuration` (default `10m`) | Wall-clock budget per run: `"15m"`, `"90s"`, `"1h"`, or a number of seconds. At the budget the agent is steered to wrap up; 90s later it is hard-aborted — even mid-tool-call. `0` = explicitly unlimited (overrides the global default). See [Wall-Clock Deadline](#wall-clock-deadline) |
 | `persist_session` | `subagents.json` `rememberAgents` (default `true`) | Persist this subagent as a normal pi session instead of keeping the session in memory only; overrides the `rememberAgents` project default in both directions. It records its spawning session as parent, so it nests under it in `/resume`. The subagent's `.output` transcript is still written either way unless `output_transcript: false` |
 | `output_transcript` | `true` (or `subagents.json` `outputTranscript`) | Write this subagent's `.output` transcript; when set, overrides the `subagents.json` `outputTranscript` default. Set `false` to write no transcript file or path. Governs only the transcript — independent of `persist_session`, `isolation: worktree`, and `memory:` |
 | `session_dir` | pi default | Optional session directory when `persist_session: true`; omitted uses pi's normal session location, and relative paths resolve from the agent cwd. A session outside the parent's session directory (this override, or `isolation: worktree`) is listed separately, so it shows as a root instead of nesting |
@@ -458,6 +461,22 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 2. Up to 5 grace turns to finish cleanly
 3. Hard abort only after the grace period
 
+## Wall-Clock Deadline
+
+Turn counts miss productive loops — a turn holding a 10-minute build and a turn holding a `grep` count the same, so an agent can burn 37 minutes well inside its turn limit. Every run therefore also carries a wall-clock budget: the agent's `max_duration:` frontmatter, else the `defaultMaxDuration` setting, else **10 minutes**.
+
+1. At the budget — steering message: *"Stop working NOW. Report what you completed, what remains, and anything blocking you."*
+2. 90 seconds of grace (`getDeadlineGraceMs`) to write that handoff
+3. Hard abort **on the timer itself**, not at a turn boundary — a run wedged inside one long tool call still dies on time
+
+The clock starts at the run's first turn, so time queued under `maxConcurrent` is free. A **human** steer (viewer composer, `&handle` mention) resets the clock to a full budget — you just handed the agent new work with eyes on it; the model's `steer_subagent` and the deadline's own wrap-up steer do not. Nested children get their own budget, clamped to the parent's remaining lifetime.
+
+A deadline kill reports with explicit **non-retry framing** — "killed at its 15m wall-clock budget; NOT a transient failure; do not re-run the same task unchanged" — so the orchestrator doesn't respawn the same doomed task.
+
+## Flight Recorder
+
+Every agent accumulates a bounded ledger of what it **did**: files written/edited, distinct bash commands with run and failure counts, and the last 30 tool calls with truncated args. On an abnormal exit (`stopped`, `aborted`, `error`) the ledger is appended to every result surface — the inline tool result, the background completion notification, `get_subagent_result`, and nested results — so a stopped run can never again report just "No output." while its real output sits in the files it touched. Clean completions render nothing and cost no extra tokens.
+
 | Status | Meaning | Icon |
 |--------|---------|------|
 | `completed` | Finished naturally | `✓` green |
@@ -515,7 +534,9 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, default max duration `10m`, grace turns `5`, nested depth `2`, join mode `smart`).
+
+**Default max duration** (`defaultMaxDuration`, default `"10m"`): the [wall-clock budget](#wall-clock-deadline) for agents whose frontmatter doesn't set `max_duration:`. A string with a unit (`"10m"`, `"90s"`, `"1h"`) or a number of **seconds**; `0` disables the deadline. Settings-file only (no menu entry); per-agent frontmatter overrides it in both directions.
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 

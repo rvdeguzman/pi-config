@@ -24,6 +24,7 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, get
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { formatDurationMs, getDefaultMaxDurationMs, setDefaultMaxDurationMs } from "./deadline.js";
 import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType } from "./mention.js";
@@ -31,11 +32,11 @@ import { runMentionClone } from "./mention-clone.js";
 import { type ModelRegistry, modelCandidates, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
-import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, pruneOutputFiles, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
-import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { abnormalExitReport, getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -179,8 +180,12 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
+    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status, record.deadline)}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
+    // Abnormal exits only (self-gating): deadline non-retry framing + flight
+    // recorder. Deliberately NOT truncated with the result preview — on an
+    // abnormal exit, what the agent DID is the payload, not the garnish.
+    abnormalExitReport(record) ? `<abnormal-exit>${escapeXml(abnormalExitReport(record).trim())}</abnormal-exit>` : null,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join('\n');
@@ -740,7 +745,7 @@ export default function (pi: ExtensionAPI) {
         // steer_subagent tool. Un-consume the result so the agent's reply to
         // this message is still relayed even if the LLM read its last answer.
         record.resultConsumed = false;
-        manager.steer(record.id, mention.message);
+        manager.steer(record.id, mention.message, "human");
         pi.events.emit("subagents:steered", { id: record.id, message: mention.message });
         ctx.ui.notify(`Sent to ${target}`, "info");
         return { action: "handled" };
@@ -1157,6 +1162,11 @@ export default function (pi: ExtensionAPI) {
     return fallbacks.length > 0 ? `${label} +${fallbacks.length} fallback` : label;
   }
 
+  // Transcripts now live under the agent dir (durable — tmpdir() reaping cost
+  // us a 37-minute run's only evidence), so nothing external ages them out.
+  // Prune runs older than 14 days once per activation; best-effort.
+  try { pruneOutputFiles(); } catch { /* never block activation on cleanup */ }
+
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
@@ -1164,6 +1174,7 @@ export default function (pi: ExtensionAPI) {
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setDefaultMaxTurns,
+      setDefaultMaxDuration: setDefaultMaxDurationMs,
       setGraceTurns,
       setDefaultJoinMode,
       setSchedulingEnabled,
@@ -1724,10 +1735,10 @@ Terse command-style prompts produce shallow, generic work.
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
+          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}${abnormalExitReport(record)}`, buildDetails(detailBase, record));
         }
         return textResult(
-          record.result?.trim() || "No output.",
+          (record.result?.trim() || "No output.") + abnormalExitReport(record),
           buildDetails(detailBase, record),
         );
       }
@@ -1915,16 +1926,20 @@ Terse command-style prompts produce shallow, generic work.
       const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
 
       if (record.status === "error") {
-        // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
+        // Error headline + any partial output the run produced before failing,
+        // plus the flight recorder — what it DID, since what it SAID is gone.
+        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}${abnormalExitReport(record)}`, details);
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
       const statsParts = [`${record.toolUses} tool uses`];
       if (tokenText) statsParts.push(tokenText);
       return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
-        (record.result?.trim() || "No output."),
+        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status, record.deadline)}.\n\n` +
+        (record.result?.trim() || "No output.") +
+        // Empty for completed/steered — stopped/aborted runs get the recorder,
+        // so "No output." after 37 minutes can never again be the whole story.
+        abnormalExitReport(record),
         details,
       );
     },
@@ -1987,15 +2002,15 @@ Terse command-style prompts produce shallow, generic work.
 
       let output =
         `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
+        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status, record.deadline)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
       } else if (record.status === "error") {
-        output += `Error: ${record.error}${partialOutputSuffix(record)}`;
+        output += `Error: ${record.error}${partialOutputSuffix(record)}${abnormalExitReport(record)}`;
       } else {
-        output += record.result?.trim() || "No output.";
+        output += (record.result?.trim() || "No output.") + abnormalExitReport(record);
       }
 
       // Mark result as consumed — suppresses the completion notification
@@ -2261,7 +2276,7 @@ Terse command-style prompts produce shallow, generic work.
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
-        }, keybindings, (message: string) => manager.steer(record.id, message));
+        }, keybindings, (message: string) => manager.steer(record.id, message, "human"));
       },
       {
         overlay: true,
@@ -2550,6 +2565,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
+      // 0 = unlimited, mirroring defaultMaxTurns. Written in the unit-string
+      // form parseDuration reads ("10m", "90s"), so a save/load round-trip is
+      // stable — a bare number in this file means SECONDS, not ms.
+      defaultMaxDuration: getDefaultMaxDurationMs() != null ? formatDurationMs(getDefaultMaxDurationMs()!) : 0,
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),

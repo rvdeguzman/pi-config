@@ -33,6 +33,16 @@ describe("documented defaults (README:441)", () => {
     expect(getDefaultMaxTurns()).toBeUndefined();
   }, HEAVY_REIMPORT_MS);
 
+  it("wall-clock budget defaults to 10 minutes", async () => {
+    const { getDefaultMaxDurationMs } = await import("../src/deadline.js");
+    expect(getDefaultMaxDurationMs()).toBe(600_000);
+  });
+
+  it("deadline grace defaults to 90 seconds", async () => {
+    const { getDeadlineGraceMs } = await import("../src/deadline.js");
+    expect(getDeadlineGraceMs()).toBe(90_000);
+  });
+
   it("nested subagent depth defaults to 2", async () => {
     const { getMaxSubagentDepth } = await import("../src/nested-tools.js");
     expect(getMaxSubagentDepth()).toBe(2);

@@ -13,6 +13,7 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { createFlightRecorder } from "./flight-recorder.js";
 import { assignHandle, handleBase } from "./mention.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
@@ -105,6 +106,12 @@ interface SpawnOptions {
   reclaim?: { handle: string; alias?: string };
   model?: Model<any>;
   maxTurns?: number;
+  /**
+   * Cap in ms on the resolved wall-clock budget — nested spawns pass the
+   * parent's remaining lifetime so a child cannot outlive its parent's
+   * deadline. See RunOptions.maxDurationCapMs.
+   */
+  maxDurationCapMs?: number;
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
@@ -268,6 +275,9 @@ export class AgentManager {
       toolUses: 0,
       startedAt: Date.now(),
       abortController,
+      // One recorder per record, fed by every run including resumes — the ring
+      // buffer bounds it, so continuity across resumes costs nothing.
+      recorder: createFlightRecorder(),
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
       // Raw tri-state (not coerced to a boolean): true = background, false =
@@ -365,6 +375,16 @@ export class AgentManager {
       agentId: id,
       model: options.model,
       maxTurns: options.maxTurns,
+      maxDurationCapMs: options.maxDurationCapMs,
+      // Parked on the record so a HUMAN steer can reset the clock and nested
+      // spawns can clamp children to this run's remaining lifetime.
+      onDeadlineControl: (deadline) => {
+        record.deadline = {
+          budgetMs: deadline.budgetMs,
+          reset: () => deadline.arm(),
+          remainingMs: () => deadline.remainingMs(),
+        };
+      },
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
@@ -383,6 +403,7 @@ export class AgentManager {
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
+        record.recorder?.observe(activity);
         options.onToolActivity?.(activity);
       },
       onTurnEnd: options.onTurnEnd,
@@ -423,7 +444,15 @@ export class AgentManager {
         options.onSessionCreated?.(session);
       },
     })
-      .then(({ responseText, session, aborted, steered, failure }) => {
+      .then(({ responseText, session, aborted, steered, failure, deadlineExceeded, deadlineSteered }) => {
+        // Deadline outcome lands on the record BEFORE status resolution — the
+        // status stays "aborted"/"steered" (existing vocabulary); status-note.ts
+        // branches on these flags for the time-budget wording and the
+        // non-retry framing.
+        if (record.deadline) {
+          if (deadlineExceeded) record.deadline.exceeded = true;
+          if (deadlineSteered) record.deadline.softFired = true;
+        }
         // Don't overwrite status if externally stopped via abort()
         if (record.status !== "stopped") {
           // Precedence: a hard abort keeps "aborted"; then a failed final turn
@@ -653,6 +682,7 @@ export class AgentManager {
       const { text, failure } = await resumeAgent(record.session, prompt, {
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
+          record.recorder?.observe(activity);
           options?.onToolActivity?.(activity);
         },
         onAssistantUsage: (usage) => {
@@ -743,6 +773,7 @@ export class AgentManager {
     const promise = resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
+        record.recorder?.observe(activity);
         options.onToolActivity?.(activity);
       },
       onAssistantUsage: (usage) => {
@@ -789,13 +820,20 @@ export class AgentManager {
    * ready yet, the message is queued on `pendingSteers` and flushed when the
    * session is created. Returns false if the agent can't accept steering
    * (unknown id, or no longer running/queued).
+   *
+   * `origin` decides whether the wall-clock deadline resets: a HUMAN steer
+   * (viewer composer, `&handle` mention) hands the agent new work with eyes on
+   * it, so the old budget is stale — the clock restarts in full. The model's
+   * `steer_subagent` and the deadline's own wrap-up steer do NOT reset (the
+   * default), or the loop being leashed could keep itself alive by talking.
    */
-  steer(id: string, message: string): boolean {
+  steer(id: string, message: string, origin: "human" | "model" = "model"): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
     if (record.status !== "running" && record.status !== "queued") return false;
     if (record.session) {
       record.session.steer(message).catch(() => {});
+      if (origin === "human") record.deadline?.reset?.();
     } else {
       if (!record.pendingSteers) record.pendingSteers = [];
       record.pendingSteers.push(message);

@@ -460,6 +460,40 @@ Negative turns.`);
     expect(result.get("negturns")!.maxTurns).toBeUndefined();
   });
 
+  it("parses max_duration unit strings and bare seconds into ms", () => {
+    writeAgent("timed", `---
+max_duration: 15m
+---
+
+Timed.`);
+    writeAgent("timed-secs", `---
+max_duration: 300
+---
+
+Timed in seconds.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("timed")!.maxDurationMs).toBe(900_000);
+    expect(result.get("timed-secs")!.maxDurationMs).toBe(300_000);
+  });
+
+  it("keeps max_duration: 0 as explicit-unlimited and drops garbage", () => {
+    writeAgent("untimed", `---
+max_duration: 0
+---
+
+No deadline — overrides the global default.`);
+    writeAgent("badtimed", `---
+max_duration: soon
+---
+
+Garbage duration.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("untimed")!.maxDurationMs).toBe(0);
+    expect(result.get("badtimed")!.maxDurationMs).toBeUndefined();
+  });
+
   it("handles prompt_mode: append", () => {
     writeAgent("appender", `---
 prompt_mode: append

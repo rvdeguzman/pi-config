@@ -20,6 +20,7 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
+import { createDeadline, type Deadline, formatDurationMs, getDefaultMaxDurationMs, normalizeMaxDurationMs } from "./deadline.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { modelCandidates } from "./model-resolver.js";
@@ -370,6 +371,16 @@ export function resolveDefaultModel(
 export interface ToolActivity {
   type: "start" | "end";
   toolName: string;
+  /**
+   * Present on real tool events; absent for the synthetic diagnostics that
+   * reuse this channel (`extension-error:*`, `tools-error:*`). The flight
+   * recorder keys start→end matching off it and skips entries without one.
+   */
+  toolCallId?: string;
+  /** Tool-call arguments — start events only. */
+  args?: unknown;
+  /** Whether the tool returned an error — end events only. */
+  isError?: boolean;
 }
 
 export interface RunOptions {
@@ -379,6 +390,20 @@ export interface RunOptions {
   agentId?: string;
   model?: Model<any>;
   maxTurns?: number;
+  /**
+   * Upper bound in ms applied AFTER the frontmatter/default wall-clock budget
+   * resolves — nested children are clamped to their parent's remaining
+   * lifetime with it. Unlike an override, it also caps an agent whose own
+   * config says unlimited: a child must not outlive its parent's deadline.
+   */
+  maxDurationCapMs?: number;
+  /**
+   * Called when a wall-clock deadline is armed for this run, with the live
+   * Deadline. The manager parks it on the record so a HUMAN steer can reset
+   * the clock (`arm()` restarts with the full budget) and nested spawns can
+   * read `remainingMs()` for the child clamp.
+   */
+  onDeadlineControl?: (deadline: Deadline) => void;
   signal?: AbortSignal;
   isolated?: boolean;
   inheritContext?: boolean;
@@ -452,10 +477,14 @@ export interface RunOptions {
 export interface RunResult {
   responseText: string;
   session: AgentSession;
-  /** True if the agent was hard-aborted (max_turns + grace exceeded). */
+  /** True if the agent was hard-aborted (max_turns + grace exceeded, or the wall-clock deadline). */
   aborted: boolean;
-  /** True if the agent was steered to wrap up (hit soft turn limit) but finished in time. */
+  /** True if the agent was steered to wrap up (soft turn OR time limit) but finished in time. */
   steered: boolean;
+  /** True if the wall-clock hard deadline killed the run — drives the non-retry framing. */
+  deadlineExceeded: boolean;
+  /** True if the deadline's wrap-up steer fired (regardless of whether it finished in time). */
+  deadlineSteered: boolean;
   /**
    * A failure message for the run's FINAL assistant turn, when that turn failed:
    * a provider error (stopReason "error"), or a "length" stop that produced no
@@ -969,6 +998,35 @@ export async function runAgent(
   let softLimitReached = false;
   let aborted = false;
 
+  // ─── Wall-clock deadline ─────────────────────────────────────────
+  // Turn counts miss productive loops (a 10-minute build is one turn); this is
+  // the leash that would have killed the 37-minute incident at its budget.
+  // Budget: frontmatter `max_duration:` → `defaultMaxDuration` → 10m; 0 =
+  // unlimited. The parent-remaining cap applies after resolution, so even an
+  // "unlimited" child dies with its parent's deadline. Armed just before
+  // prompt() — session setup above and any queue wait before it are free —
+  // and the HARD abort fires on the timer itself, not at a turn boundary,
+  // so a run wedged inside one long tool call still dies on time.
+  const resolvedBudgetMs = normalizeMaxDurationMs(agentConfig?.maxDurationMs ?? getDefaultMaxDurationMs());
+  const capMs = normalizeMaxDurationMs(options.maxDurationCapMs);
+  const budgetMs = capMs != null && (resolvedBudgetMs == null || capMs < resolvedBudgetMs) ? capMs : resolvedBudgetMs;
+  const deadline: Deadline | undefined = budgetMs != null
+    ? createDeadline(budgetMs, {
+        onSoft: (budget, grace) => {
+          session.steer(
+            `You have used your ${formatDurationMs(budget)} time budget. Stop working NOW. ` +
+            `Report what you completed, what remains, and anything blocking you — this report is your final answer. ` +
+            `You will be force-stopped in ${formatDurationMs(grace)}.`,
+          ).catch(() => {});
+        },
+        onHard: () => {
+          aborted = true;
+          session.abort();
+        },
+      })
+    : undefined;
+  if (deadline) options.onDeadlineControl?.(deadline);
+
   let currentMessageText = "";
   const unsubTurns = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") {
@@ -992,10 +1050,10 @@ export async function runAgent(
       options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
     }
     if (event.type === "tool_execution_start") {
-      options.onToolActivity?.({ type: "start", toolName: event.toolName });
+      options.onToolActivity?.({ type: "start", toolName: event.toolName, toolCallId: event.toolCallId, args: event.args });
     }
     if (event.type === "tool_execution_end") {
-      options.onToolActivity?.({ type: "end", toolName: event.toolName });
+      options.onToolActivity?.({ type: "end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError });
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
@@ -1025,16 +1083,26 @@ export async function runAgent(
   // Boundary for the history fallback: only assistant text produced from here
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
+  deadline?.arm();
   try {
     await session.prompt(effectivePrompt);
   } finally {
+    deadline?.clear();
     unsubTurns();
     collector.unsubscribe();
     cleanupAbort();
   }
 
   const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
-  return { responseText, session, aborted, steered: softLimitReached, failure: finalTurnError(session, startLen) };
+  return {
+    responseText,
+    session,
+    aborted,
+    steered: softLimitReached || (deadline?.softFired() ?? false),
+    deadlineExceeded: deadline?.exceeded() ?? false,
+    deadlineSteered: deadline?.softFired() ?? false,
+    failure: finalTurnError(session, startLen),
+  };
 }
 
 /**
@@ -1059,8 +1127,8 @@ export async function resumeAgent(
 
   const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
-        if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
-        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
+        if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName, toolCallId: event.toolCallId, args: event.args });
+        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError });
         if (event.type === "message_end" && event.message.role === "assistant") {
           const u = (event.message as any).usage;
           if (u) options.onAssistantUsage?.({

@@ -180,8 +180,10 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
     const cwd = mkdtempSync(join(tmpdir(), "nested-e2e-bg-"));
     tmpDirs.push(cwd);
     writeAgents(cwd);
-    const transcriptRoot = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`, encodeCwd(cwd));
-    rmSync(transcriptRoot, { recursive: true, force: true });
+    // Resolved AFTER the run: transcripts now live under the agent dir, and
+    // the runner isolates that to a hermetic temp dir for the run's duration —
+    // evaluating outputFilesRoot() out here would point at the dev's real one.
+    let transcriptRoot: string;
 
     const respond = (context: Context): FauxReply => {
       const text = firstUserText(context);
@@ -217,44 +219,43 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
       });
     };
 
-    try {
-      run = await runPrintMode({
-        prompt: "Delegate the work.",
-        cwd,
-        respond,
-        live: false,
-        beforeRun: () => { registerAgents(loadCustomAgents(cwd)); },
-      });
+    run = await runPrintMode({
+      prompt: "Delegate the work.",
+      cwd,
+      respond,
+      live: false,
+      beforeRun: () => { registerAgents(loadCustomAgents(cwd)); },
+    });
 
-      // The background child ran and its output came back through the id the
-      // spawn handed out — so it was never queued behind its waiting parent.
-      const orchestratorResult = run.parentSession.messages
-        .filter((m) => m.role === "toolResult")
-        .flatMap((m) => (m.content as Array<{ text?: string }>).map((b) => b.text ?? ""))
-        .join("\n");
-      expect(orchestratorResult).toContain("orchestrator polled");
-      expect(orchestratorResult).toContain(WORKER_MARKER);
+    // The background child ran and its output came back through the id the
+    // spawn handed out — so it was never queued behind its waiting parent.
+    const orchestratorResult = run.parentSession.messages
+      .filter((m) => m.role === "toolResult")
+      .flatMap((m) => (m.content as Array<{ text?: string }>).map((b) => b.text ?? ""))
+      .join("\n");
+    expect(orchestratorResult).toContain("orchestrator polled");
+    expect(orchestratorResult).toContain(WORKER_MARKER);
 
-      // Only the REAL manager wires onSessionCreated → streamToOutputFile for a
-      // nested spawn, and only real rootSessionId propagation puts the file under
-      // this root. Identify the WORKER's own transcript by the prompt in its
-      // initial entry — matching the marker alone would also match the
-      // orchestrator's transcript, which merely echoes it, and would pass even
-      // with nested transcripts switched off entirely.
-      // Match on the FIRST line — writeInitialEntry seeds each transcript with the
-      // prompt that agent was given. Searching the whole file would also match the
-      // orchestrator's, which records the same string inside its Agent tool-call
-      // arguments, and would pass with nested transcripts switched off entirely.
-      const transcripts = findOutputFiles(transcriptRoot).map((f) => readFileSync(f, "utf-8"));
-      const workerTranscript = transcripts.find((t) => {
-        const first = JSON.parse(t.split("\n")[0]) as { message?: { content?: unknown } };
-        return first.message?.content === "Do the leaf work.";
-      });
-      expect(workerTranscript).toBeDefined();
-      // ...and it streamed the child's own turn, not just the seeded prompt.
-      expect(workerTranscript).toContain(WORKER_MARKER);
-    } finally {
-      rmSync(transcriptRoot, { recursive: true, force: true });
-    }
+    transcriptRoot = join(run.agentDir, "subagent-runs", encodeCwd(cwd));
+
+    // Only the REAL manager wires onSessionCreated → streamToOutputFile for a
+    // nested spawn, and only real rootSessionId propagation puts the file under
+    // this root. Identify the WORKER's own transcript by the prompt in its
+    // initial entry — matching the marker alone would also match the
+    // orchestrator's transcript, which merely echoes it, and would pass even
+    // with nested transcripts switched off entirely.
+    // Match on the FIRST line — writeInitialEntry seeds each transcript with the
+    // prompt that agent was given. Searching the whole file would also match the
+    // orchestrator's, which records the same string inside its Agent tool-call
+    // arguments, and would pass with nested transcripts switched off entirely.
+    const transcripts = findOutputFiles(transcriptRoot).map((f) => readFileSync(f, "utf-8"));
+    const workerTranscript = transcripts.find((t) => {
+      const first = JSON.parse(t.split("\n")[0]) as { message?: { content?: unknown } };
+      return first.message?.content === "Do the leaf work.";
+    });
+    expect(workerTranscript).toBeDefined();
+    // ...and it streamed the child's own turn, not just the seeded prompt.
+    expect(workerTranscript).toContain(WORKER_MARKER);
+    // No transcript cleanup needed: the hermetic agent dir dies with dispose().
   });
 });

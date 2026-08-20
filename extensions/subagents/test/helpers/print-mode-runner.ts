@@ -161,6 +161,14 @@ export interface PrintModeRun {
   /** Faux model call count (0 in live mode). */
   modelCalls: number;
   /**
+   * The agent dir the run actually used — the hermetic temp dir under
+   * `isolateGlobals` (default). Artifacts filed under it (e.g. subagent-runs
+   * transcripts) must be located through THIS, not through getAgentDir()
+   * evaluated outside the run, where the env override is already restored.
+   * Gone after `dispose()`.
+   */
+  agentDir: string;
+  /**
    * Tear down: emit session_shutdown (so extensions clear timers), dispose the
    * session, unregister faux, restore cwd/env, rm temp dir. Async — await it.
    */
@@ -517,6 +525,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     manager,
     subagents,
     modelCalls: faux?.state.callCount ?? 0,
+    agentDir,
     dispose,
   };
 }

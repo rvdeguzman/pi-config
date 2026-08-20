@@ -8,6 +8,7 @@ model: [anthropic/claude-sonnet-5, kimi-coding/k3, openai-codex/gpt-5.6-sol]
 thinking: medium
 max_turns: 20
 prompt_mode: replace
+max_duration: 8m
 ---
 
 # READ-ONLY — NO FILE MODIFICATIONS

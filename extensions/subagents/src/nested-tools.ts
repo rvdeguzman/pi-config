@@ -24,7 +24,7 @@ import {
   streamToOutputFile,
   writeInitialEntry,
 } from "./output-file.js";
-import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { abnormalExitReport, getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import type {
   AgentConfig,
   AgentInvocation,
@@ -52,6 +52,8 @@ interface NestedSpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;
+  /** Cap on the child's wall-clock budget — the parent's remaining lifetime. */
+  maxDurationCapMs?: number;
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
@@ -124,7 +126,7 @@ type ResultPosition = "inline" | "fetched";
 
 function formatRecord(record: AgentRecord, position: ResultPosition): string {
   if (record.status === "error") {
-    return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
+    return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}${abnormalExitReport(record)}`;
   }
   if (record.status === "queued" || record.status === "running") {
     return `Agent ${record.id} is ${record.status}.`;
@@ -134,9 +136,10 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   // leads — appended, it would look like part of the child's own output.
   const text = record.result?.trim() || record.error?.trim() || "No output.";
   const note = position === "inline"
-    ? getForegroundOutcomeNote(record.status)
-    : getStatusNote(record.status);
-  return note ? `Nested agent${note}.\n\n${text}` : text;
+    ? getForegroundOutcomeNote(record.status, record.deadline)
+    : getStatusNote(record.status, record.deadline);
+  const body = note ? `Nested agent${note}.\n\n${text}` : text;
+  return `${body}${abnormalExitReport(record)}`;
 }
 
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
@@ -249,6 +252,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         description: params.description,
         model,
         maxTurns: invocation.maxTurns,
+        // A child must not outlive its parent's wall-clock deadline: cap its
+        // resolved budget at the parent's remaining lifetime. Undefined when
+        // the parent runs without a deadline — the child then keeps its own.
+        maxDurationCapMs: context.manager.getRecord(context.parentAgentId)?.deadline?.remainingMs?.(),
         isolated: invocation.isolated,
         inheritContext: invocation.inheritContext,
         thinkingLevel: invocation.thinking,

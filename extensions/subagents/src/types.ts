@@ -4,7 +4,26 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { FlightRecorder } from "./flight-recorder.js";
 import type { LifetimeUsage } from "./usage.js";
+
+/**
+ * Wall-clock deadline state for the current run, set when a budget applies.
+ * Function fields close over the live run's timers, like `abortController` —
+ * they never serialize and die with the record.
+ */
+export interface DeadlineState {
+  /** Applied budget in ms (after frontmatter/default/parent-clamp resolution). */
+  budgetMs: number;
+  /** The deadline's wrap-up steer fired (time budget, distinct from the turn limit). */
+  softFired?: boolean;
+  /** The run was hard-aborted by the deadline. Drives the non-retry framing. */
+  exceeded?: boolean;
+  /** Restart the clock with a full budget from now. Human steers call this. */
+  reset?: () => void;
+  /** Remaining lifetime in ms until the hard abort — the clamp for nested children. */
+  remainingMs?: () => number;
+}
 
 export type { ThinkingLevel };
 
@@ -51,6 +70,12 @@ export interface AgentConfig {
   model?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
+  /**
+   * Wall-clock budget in ms from `max_duration:` frontmatter. 0 = explicitly
+   * unlimited (overrides the global default); undefined = not set (the global
+   * `defaultMaxDuration` applies). See deadline.ts.
+   */
+  maxDurationMs?: number;
   /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
   persistSession?: boolean;
   /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
@@ -183,6 +208,14 @@ export interface AgentRecord {
   sessionFile?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
+  /**
+   * Bounded ledger of what the agent DID (files touched, commands run, last N
+   * tool calls). Created at spawn, fed on every run including resumes, and
+   * rendered only on abnormal exits — see flight-recorder.ts.
+   */
+  recorder?: FlightRecorder;
+  /** Wall-clock deadline state for the current run. See deadline.ts. */
+  deadline?: DeadlineState;
   /**
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately
