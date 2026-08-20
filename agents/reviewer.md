@@ -5,7 +5,7 @@ display_name: Reviewer
 color: orange
 tools: read, grep, find, ls, bash
 extensions: [pi-claude-auth]
-model: [anthropic/claude-fable-5, anthropic/claude-opus-5, openai-codex/gpt-5.6-sol]
+model: [anthropic/claude-fable-5, anthropic/claude-opus-5, anthropic/claude-sonnet-5, openai-codex/gpt-5.6-sol]
 thinking: medium
 max_turns: 20
 prompt_mode: replace

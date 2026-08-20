@@ -5,7 +5,7 @@ display_name: Researcher
 color: teal
 tools: read, write, ext:pi-exa/web_search_exa, ext:pi-exa/web_fetch_exa, ext:pi-exa/deep_search_exa
 extensions: [pi-exa, pi-claude-auth]
-model: [anthropic/claude-fable-5, anthropic/claude-opus-5, openai-codex/gpt-5.6-luna]
+model: [anthropic/claude-fable-5, anthropic/claude-opus-5, anthropic/claude-sonnet-5, openai-codex/gpt-5.6-luna]
 thinking: medium
 prompt_mode: replace
 max_duration: 10m

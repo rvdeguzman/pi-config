@@ -5,7 +5,7 @@ display_name: Scout
 color: cyan
 tools: read, grep, find, ls, bash
 extensions: [pi-claude-auth]
-model: [anthropic/claude-opus-5, anthropic/claude-sonnet-5, kimi-coding/k3, openai-codex/gpt-5.6-luna]
+model: [anthropic/claude-fable-5, anthropic/claude-opus-5, anthropic/claude-sonnet-5, kimi-coding/k3, openai-codex/gpt-5.6-luna]
 thinking: low
 prompt_mode: replace
 max_duration: 5m
