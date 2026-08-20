@@ -4,7 +4,8 @@ description: "Read-only review specialist for diffs, plans, roadmap-vs-implement
 display_name: Reviewer
 color: orange
 tools: read, grep, find, ls, bash
-model: [anthropic/claude-sonnet-5, kimi-coding/k3, openai-codex/gpt-5.6-sol]
+extensions: [pi-claude-auth]
+model: [anthropic/claude-fable-5, anthropic/claude-opus-5, openai-codex/gpt-5.6-sol]
 thinking: medium
 max_turns: 20
 prompt_mode: replace

@@ -4,6 +4,7 @@ description: "Implementation subagent for a scoped, already-decided task — a s
 display_name: Worker
 color: green
 tools: read, grep, find, ls, bash, edit, write
+extensions: [pi-claude-auth]
 model: [openai-codex/gpt-5.6-sol, anthropic/claude-sonnet-5, anthropic/claude-opus-5]
 thinking: high
 prompt_mode: replace

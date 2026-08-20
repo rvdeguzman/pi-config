@@ -294,7 +294,7 @@ All fields are optional — sensible defaults for everything.
 | `display_name` | the type | Label shown in the UI (widget, agent list, badges) — cosmetic only, and independent of `name`. Claude Code has no equivalent; a file that sets only `name` badges as its type, unchanged |
 | `color` | — | Background color for the agent name badge in the Agent tool header, widget, FleetView, and conversation viewer. Supports Claude Code's `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (the values its own default theme uses); quoted six-digit hex such as `"#8B5CF6"`; and Agency Agents aliases (`amber`, `teal`, `indigo`, `gold`, `neon-green`, `neon-cyan`, `metallic-blue`, `violet`, `rose`, `lime`, `gray`/`grey`, `fuchsia`, `slate`, `navy`). Badge text is black or white, whichever clears 4.5:1 against the rendered background — Claude Code uses one inverse color for every badge. Invalid values render no badge and preserve each surface's existing theme foreground |
 | `tools` | all 7 | Which tools the agent can call. Built-in names (`read, grep, …`), `*` / `all` (all built-ins), `none`, and `ext:<extension>` / `ext:<extension>/<tool>` selectors for extension tools. See [Tool & extension scoping](#tool--extension-scoping) below |
-| `extensions` | `true` | Which extensions to load for the agent. `true` (all defaults), `false` (none), or an explicit list: `[mcp, "/abs/path.ts", "*"]`. See [Tool & extension scoping](#tool--extension-scoping) below |
+| `extensions` | `true` | Which extensions to load for the agent. `true` (all defaults), `false` (none except the pruned Anthropic OAuth infrastructure needed for Claude authentication), or an explicit list: `[mcp, "/abs/path.ts", "*"]`. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `exclude_extensions` | — | Extension denylist applied after `extensions:` — exclude wins. Plain names only (case-insensitive), no paths or `*`. Useful with `extensions: true` to drop one extension (e.g. `pi-notify`) |
 | `skills` | `true` | `true` inherits the parent's skills; `false` inherits none. A comma-separated list preloads **only** those skills into the system prompt and does not inherit the rest (see [Skill Preloading](#skill-preloading) for discovery locations) |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
@@ -311,7 +311,7 @@ All fields are optional — sensible defaults for everything.
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
-| `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
+| `isolated` | `false` | Hermetic specialist mode: forces ordinary extensions off + `skills: false` + drops `ext:` selectors. Only built-in tools. Anthropic OAuth infrastructure is retained with no tools, commands, resources, or prompt hooks so Claude credentials and request billing transforms still work. Distinct from `isolation: worktree` (filesystem) |
 | `enabled` | `true` | Set to `false` to disable an agent |
 
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
@@ -354,7 +354,7 @@ tools: "*"                        # all 7 built-ins (alias: `all`)
 tools: none                       # zero built-ins (alias: `""`)
 tools: "*, ext:mcp/search"        # built-ins plus one extension tool
 
-extensions: false                 # no extensions load
+extensions: false                 # no ordinary extensions; Anthropic OAuth hooks only
 extensions: [mcp]                 # only mcp loads
 extensions: ["*", "/abs/foo.ts"]  # all defaults plus one path-loaded extension
 
@@ -369,7 +369,8 @@ isolated: true                    # hermetic: built-ins only, no extensions/skil
 
 A few rules the examples don't make obvious:
 
-- `extensions:` is the sole loading authority. `ext:foo` in `tools:` narrows what surfaces; it can't load `foo` on its own. Mismatches fire `extension-error:…` warnings.
+- `extensions: false` and `isolated: true` retain one infrastructure exception: an extension that registers the `anthropic` provider (such as `pi-claude-auth`) keeps only `session_start`/`session_shutdown` and provider request/response hooks. Its tools, commands, resource discovery, prompt hooks, renderers, and every non-Anthropic extension are removed. This lets Claude OAuth credentials refresh and preserves subscription billing headers without widening the agent's callable tool surface.
+- `extensions:` is otherwise the sole loading authority. `ext:foo` in `tools:` narrows what surfaces; it can't load `foo` on its own. Mismatches fire `extension-error:…` warnings.
 - Any `ext:` entry flips extension tools to an explicit allowlist — unnamed extensions still load (handlers fire) but expose no tools. So `tools: "*, ext:mcp/search"` exposes only `search` from `mcp`, nothing from any other extension.
 - Extension names match case-insensitively (`[Mcp]` = `[mcp]`); tool names in `ext:foo/bar` stay case-sensitive.
 - Extensions that register tools **lazily** work too. MCP-backed extensions typically can't enumerate their tools until their servers connect, so they register from `session_start` or `before_agent_start` rather than at load. Subagent scoping is re-derived as tools appear, so these surface normally — including under `ext:` selectors, which keep narrowing correctly no matter when a tool shows up.
@@ -385,7 +386,7 @@ A few rules the examples don't make obvious:
 |---|---|
 | omitted, `*`, or `all` | `*` |
 | a list of built-ins | that list, e.g. `read, grep` |
-| `none` with `isolated: true` or `extensions: false` | `none` |
+| `none` with `isolated: true` or `extensions: false` | `none` (Anthropic OAuth infrastructure may still run, but contributes no tools) |
 | `none`, or only `ext:` entries, with extensions loading | `no built-ins, extension tools only` |
 
 The last two rows are separate because zero built-ins is not zero tools: `tools: none` alongside `extensions:` still surfaces every extension tool, so calling it `none` would understate what the agent can do. Note `*` doesn't enumerate extension tools either — an agent with `tools: "*, ext:mcp/search"` advertises `*`.

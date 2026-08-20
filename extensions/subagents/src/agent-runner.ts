@@ -2,14 +2,15 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+import type { Extension, ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
   type AgentSessionEvent,
+  CONFIG_DIR_NAME,
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
@@ -119,6 +120,108 @@ export function extensionCanonicalNames(extPath: string): string[] {
   const canonical = extensionCanonicalName(extPath);
   const pkg = extensionPackageName(extPath);
   return pkg && pkg !== canonical ? [canonical, pkg] : [canonical];
+}
+
+/**
+ * Claude OAuth works in every subagent, including `isolated: true`, because
+ * pi-claude-auth registers Anthropic's OAuth lifecycle when its factory loads
+ * and injects the live credential/transforms from session/provider events.
+ *
+ * `isolated` still must not load ordinary extensions, so this prunes a
+ * provider-registering extension down to the auth-safe surface before binding:
+ * provider registration stays queued (the child forwards the parent's model
+ * runtime, so the OAuth override and credential application reach pi's normal
+ * auth path), while session/provider request hooks survive and everything else
+ * — tools, commands, prompt mutation, resource discovery — is stripped.
+ *
+ * The hook allowlist is the whole point: `before_provider_request` is what
+ * injects pi-claude-auth's Claude billing header, and dropping it would leave
+ * subagent requests authenticated but billed against extra usage instead of
+ * the Claude plan.
+ */
+const PROVIDER_AUTH_EVENT_NAMES = new Set([
+  "session_start",
+  "session_shutdown",
+  "before_provider_headers",
+  "before_provider_request",
+  "after_provider_response",
+]);
+
+/**
+ * Anthropic auth extensions whose factory registered the `anthropic` provider
+ * are cut back to their auth-safe event handlers and no other surfaces. This is
+ * intentionally narrow: the extension currently installed as `pi-claude-auth`
+ * uses exactly this shape (OAuth provider override + session/request hooks).
+ */
+function retainAnthropicAuthExtensions(base: LoadExtensionsResult): LoadExtensionsResult {
+  const pendingPaths = new Set([
+    ...(base.runtime.pendingProviderRegistrations ?? [])
+      .filter((registration) => registration.name === "anthropic")
+      .map((registration) => registration.extensionPath),
+    ...(base.runtime.pendingNativeProviderRegistrations ?? [])
+      .filter((registration) => registration.provider.id === "anthropic")
+      .map((registration) => registration.extensionPath),
+  ]);
+  const extensions: Extension[] = [];
+  for (const extension of base.extensions) {
+    if (!pendingPaths.has(extension.path)) continue;
+    const handlers = new Map(
+      [...extension.handlers].filter(([eventName]) => PROVIDER_AUTH_EVENT_NAMES.has(eventName)),
+    );
+    if (handlers.size === 0) continue;
+    extensions.push({
+      ...extension,
+      handlers,
+      tools: new Map(),
+      commands: new Map(),
+      flags: new Map(),
+      shortcuts: new Map(),
+      messageRenderers: new Map(),
+      markdownTransformer: undefined,
+      entryRenderers: new Map(),
+    });
+  }
+  base.runtime.pendingProviderRegistrations = (base.runtime.pendingProviderRegistrations ?? [])
+    .filter((registration) => pendingPaths.has(registration.extensionPath));
+  base.runtime.pendingNativeProviderRegistrations = (base.runtime.pendingNativeProviderRegistrations ?? [])
+    .filter((registration) => pendingPaths.has(registration.extensionPath));
+  return { ...base, extensions };
+}
+
+/**
+ * Resolve the installed pi-claude-auth entry without loading every configured
+ * extension first. Project-local npm packages win over the global install,
+ * matching Pi's package precedence. Only exact manifest entries are accepted;
+ * pi-claude-auth publishes `./src/index.ts`, so glob expansion is unnecessary.
+ */
+export function findClaudeAuthExtensionPaths(agentDir: string, configCwd: string): string[] {
+  const packageRoots = [
+    join(configCwd, CONFIG_DIR_NAME, "npm", "node_modules"),
+    join(agentDir, "npm", "node_modules"),
+  ];
+  const packageNames = ["pi-claude-auth", "@pankajudhas81/pi-claude-auth"];
+
+  for (const packageRoot of packageRoots) {
+    for (const packageName of packageNames) {
+      const packageDir = join(packageRoot, packageName);
+      const manifestPath = join(packageDir, "package.json");
+      if (!existsSync(manifestPath)) continue;
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+          pi?: { extensions?: unknown };
+        };
+        if (!Array.isArray(manifest.pi?.extensions)) continue;
+        const paths = manifest.pi.extensions
+          .filter((entry): entry is string => typeof entry === "string" && !/[*!?[\]{}]/.test(entry))
+          .map((entry) => resolve(packageDir, entry))
+          .filter((entry) => existsSync(entry));
+        if (paths.length > 0) return paths;
+      } catch {
+        // A broken optional auth package must not prevent the subagent starting.
+      }
+    }
+  }
+  return [];
 }
 
 /**
@@ -606,7 +709,7 @@ export async function runAgent(
   if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
 
   // Resolve extensions/skills: isolated overrides to false
-  const extensions = options.isolated ? false : config.extensions;
+  const extensions = config.extensions;
   // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
   // isolation is an intentional override, not a misconfiguration.
   const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
@@ -668,7 +771,7 @@ export async function runAgent(
 
   // Extension loading:
   // - true  → all default-discovered extensions
-  // - false → none (noExtensions)
+  // - false → no ordinary extensions (Anthropic auth infrastructure is retained)
   // - string[] → loader-level allowlist. Bare names keep the matching
   //   default-discovered extension; path entries load that extension fresh;
   //   "*" keeps all default-discovered extensions. Excluded extensions never
@@ -684,9 +787,13 @@ export async function runAgent(
   // which extensions load. `ext:foo` against an extension that `extensions:` excluded
   // is an orphan and warns after reload. `isolated` means no extension tools at all.
   const { extNames, narrowing } = parseExtSelectors(
-    options.isolated ? [] : (agentConfig?.extSelectors ?? []),
+    options.isolated ? [] : agentConfig?.extSelectors ?? [],
   );
-  const noExtensions = extensions === false;
+  // `extensions: false` (and `isolated`, which implies it) blocks ordinary
+  // extension loading, but provider/auth extensions are retained in a pruned
+  // form below so OAuth-backed models keep their refresh hooks and provider
+  // request transforms.
+  const noExtensions = options.isolated || extensions === false;
 
   const extensionsSpec = Array.isArray(extensions)
     ? parseExtensionsSpec(extensions, configCwd)
@@ -700,18 +807,23 @@ export async function runAgent(
   const hasExcludes = excludeNames.size > 0;
   // The override filters loaded extensions down to `keepNames` minus `excludeNames`.
   // It's only needed when we're neither loading everything without excludes
-  // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
+  // (`extensions: true` or a `"*"` wildcard) nor nothing (`extensions: false` /
+  // isolated, where provider-auth retention still needs the base set).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
-  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
+  const configuredExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
+  const additionalExtensionPaths = noExtensions
+    ? findClaudeAuthExtensionPaths(agentDir, configCwd)
+    : configuredExtensionPaths;
   // Pre-filter discovered set, captured by the override — the exclude-typo warning
   // must compare against this, not the surviving set (absence from survivors is
   // an exclude *succeeding*).
   let discoveredNames: Set<string> | undefined;
   const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
-    noExtensions || (loadAll && !hasExcludes)
+    !noExtensions && loadAll && !hasExcludes
       ? undefined
       : (base) => {
           discoveredNames = new Set(base.extensions.flatMap((e) => extensionCanonicalNames(e.path)));
+          if (noExtensions) return retainAnthropicAuthExtensions(base);
           return {
             ...base,
             extensions: base.extensions.filter((e) => {
@@ -725,6 +837,10 @@ export async function runAgent(
   const loader = new DefaultResourceLoader({
     cwd: configCwd,
     agentDir,
+    // At the extension boundary Pi loads only explicit additional paths. Feed
+    // it the resolved pi-claude-auth entry, then prune that extension to its
+    // credential/request hooks in extensionsOverride. Ordinary extension
+    // modules are never imported or executed.
     noExtensions,
     additionalExtensionPaths,
     extensionsOverride,
@@ -761,18 +877,18 @@ export async function runAgent(
   //   - `tools: ext:foo` but foo isn't in the loaded set (because `extensions:`
   //     didn't include it). Since v0.9, `ext:` no longer pulls extensions in;
   //     loading is `extensions:`-authoritative.
-  // An exclude_extensions: alongside extensions: false is contradictory — nothing
-  // loads, so there is nothing to exclude.
+  // An exclude_extensions: alongside extensions: false is contradictory — no
+  // ordinary extension survives, so there is nothing for the denylist to exclude.
   if (hasExcludes && noExtensions) {
     options.onToolActivity?.({
       type: "end",
-      toolName: `extension-error:exclude_extensions has no effect for agent "${type}" — extensions: false loads nothing`,
+      toolName: `extension-error:exclude_extensions has no effect for agent "${type}" — extensions: false loads no ordinary extensions`,
     });
   }
   // Exclude typo check: compares against the PRE-filter discovered set (an excluded
   // name absent from the surviving set is the exclude working as intended). Also
   // flags path-like and "*" entries — excludes are plain names only.
-  if (hasExcludes && discoveredNames) {
+  if (hasExcludes && discoveredNames && !noExtensions) {
     for (const name of excludeNames) {
       if (!discoveredNames.has(name)) {
         options.onToolActivity?.({
@@ -868,7 +984,8 @@ export async function runAgent(
   //     predicate installed after bind — the active set is what the LLM sees,
   //     so a registry tool that is never activated is invisible and uncallable.
   //
-  // `noExtensions`/`isolated` keeps the historical static allowlist: nothing
+  // `noExtensions`/`isolated` keeps the historical static tool allowlist:
+  // retained Anthropic auth infrastructure contributes no tools, so nothing
   // async can appear there, and a hard registry gate is the correct boundary.
   const builtinToolNameSet = new Set(toolNames);
 

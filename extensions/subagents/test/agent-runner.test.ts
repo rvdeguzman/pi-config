@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -33,6 +33,7 @@ const {
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
+  CONFIG_DIR_NAME: ".pi",
   // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
   // (an unknown path becomes an error row, mirroring a failed load) and then
   // runs extensionsOverride over the result.
@@ -44,10 +45,11 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
 
     async reload() {
-      // Mirror the real loader: `noExtensions: true` zeros out the discovered set
-      // entirely. Otherwise tests pre-register the extensions a path should
-      // resolve to; an unregistered path simply yields no extension (a failed load).
-      if (this.opts.noExtensions) {
+      // Mirror the real loader: with `noExtensions: true`, only explicit
+      // additionalExtensionPaths are loaded. Tests pre-register that explicit
+      // extension set before the override runs; an unregistered path simply
+      // yields no extension (a failed load).
+      if (this.opts.noExtensions && !this.opts.extensionsOverride) {
         loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
         return;
       }
@@ -121,6 +123,7 @@ vi.mock("../src/nested-tools.js", () => ({
 import {
   extensionCanonicalName,
   extensionCanonicalNames,
+  findClaudeAuthExtensionPaths,
   getAgentConversation,
   getDefaultMaxTurns,
   getGraceTurns,
@@ -1539,6 +1542,55 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
   });
 });
 
+describe("findClaudeAuthExtensionPaths", () => {
+  const tmpDirs: string[] = [];
+
+  function installPackage(root: string, scope: "global" | "project", entry = "./src/index.ts"): string {
+    const packageDir = scope === "global"
+      ? join(root, "npm", "node_modules", "pi-claude-auth")
+      : join(root, ".pi", "npm", "node_modules", "pi-claude-auth");
+    const entryPath = resolve(packageDir, entry);
+    mkdirSync(dirname(entryPath), { recursive: true });
+    writeFileSync(entryPath, "export default () => {};");
+    writeFileSync(
+      join(packageDir, "package.json"),
+      JSON.stringify({ name: "pi-claude-auth", pi: { extensions: [entry] } }),
+    );
+    return entryPath;
+  }
+
+  afterEach(() => {
+    while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+  });
+
+  it("resolves the installed global package entry from its pi manifest", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "subagents-auth-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "subagents-auth-cwd-"));
+    tmpDirs.push(agentDir, cwd);
+    const entry = installPackage(agentDir, "global");
+
+    expect(findClaudeAuthExtensionPaths(agentDir, cwd)).toEqual([entry]);
+  });
+
+  it("prefers a project-local package over the global install", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "subagents-auth-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "subagents-auth-cwd-"));
+    tmpDirs.push(agentDir, cwd);
+    installPackage(agentDir, "global");
+    const projectEntry = installPackage(cwd, "project");
+
+    expect(findClaudeAuthExtensionPaths(agentDir, cwd)).toEqual([projectEntry]);
+  });
+
+  it("returns no path when pi-claude-auth is not installed", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "subagents-auth-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "subagents-auth-cwd-"));
+    tmpDirs.push(agentDir, cwd);
+
+    expect(findClaudeAuthExtensionPaths(agentDir, cwd)).toEqual([]);
+  });
+});
+
 describe("parseExtensionsSpec", () => {
   it("classifies bare entries as names", () => {
     const spec = parseExtensionsSpec(["mcp", "logger"], "/work");
@@ -1773,6 +1825,136 @@ describe("agent-runner extension allowlist", () => {
   });
 });
 
+// ─── provider/auth extension retention (Claude OAuth in subagents) ─────────
+//
+// pi-claude-auth splits its work across two surfaces: the OAuth lifecycle it
+// registers with pi.registerProvider() at load, and the session/provider hooks
+// (`session_start` injects the live credential; `before_provider_request`
+// injects the Claude billing header). `extensions: false` / isolated must not
+// load ordinary extensions, but dropping that surface broke Anthropic auth in
+// subagents — and worse, left requests authenticated yet billed as extra usage.
+// These tests pin the retention shape: auth-safe hooks survive, tools don't.
+describe("agent-runner provider-auth extension retention", () => {
+  function providerAuthExtension(overrides: Record<string, unknown> = {}) {
+    return {
+      path: "/ext/pi-claude-auth/src/index.ts",
+      tools: new Map([["secret_tool", {}]]),
+      handlers: new Map([
+        ["session_start", [vi.fn()]],
+        ["before_provider_request", [vi.fn()]],
+        ["before_provider_headers", [vi.fn()]],
+        ["after_provider_response", [vi.fn()]],
+        ["session_shutdown", [vi.fn()]],
+        ["before_agent_start", [vi.fn()]],
+        ["resources_discover", [vi.fn()]],
+      ]),
+      ...overrides,
+    };
+  }
+
+  function withProviderAuthRuntime(runtimeOverrides: Record<string, unknown> = {}) {
+    loaderExtensionsRef.current = {
+      extensions: [providerAuthExtension() as never],
+      errors: [],
+      runtime: {
+        pendingProviderRegistrations: [
+          { name: "anthropic", config: {}, extensionPath: "/ext/pi-claude-auth/src/index.ts" },
+        ],
+        pendingNativeProviderRegistrations: [],
+        ...runtimeOverrides,
+      },
+    };
+  }
+
+  function loadedExtension(path: string) {
+    return loaderExtensionsRef.current.extensions.find((e) => e.path === path) as
+      | { handlers: Map<string, unknown[]>; tools: Map<string, unknown> }
+      | undefined;
+  }
+
+  it("isolated keeps only the provider-auth hook surface and no tools", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    withProviderAuthRuntime();
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, isolated: true });
+
+    const retained = loadedExtension("/ext/pi-claude-auth/src/index.ts");
+    expect(retained).toBeDefined();
+    expect([...retained!.handlers.keys()].sort()).toEqual([
+      "after_provider_response",
+      "before_provider_headers",
+      "before_provider_request",
+      "session_shutdown",
+      "session_start",
+    ]);
+    // Auth retention must never widen the tool surface back past isolation.
+    expect(retained!.tools.size).toBe(0);
+    expect(lastToolsPassed()).not.toContain("secret_tool");
+  });
+
+  it("extensions: false retains the same provider-auth hooks", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    withProviderAuthRuntime();
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const retained = loadedExtension("/ext/pi-claude-auth/src/index.ts");
+    expect(retained).toBeDefined();
+    expect(retained!.handlers.has("before_provider_request")).toBe(true);
+    expect(retained!.handlers.has("session_start")).toBe(true);
+    expect(retained!.handlers.has("before_agent_start")).toBe(false);
+  });
+
+  it("a provider extension with no auth-safe handlers is not retained", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    loaderExtensionsRef.current = {
+      extensions: [providerAuthExtension({ handlers: new Map([["before_agent_start", [vi.fn()]]]) }) as never],
+      errors: [],
+      runtime: {
+        pendingProviderRegistrations: [
+          { name: "anthropic", config: {}, extensionPath: "/ext/pi-claude-auth/src/index.ts" },
+        ],
+        pendingNativeProviderRegistrations: [],
+      },
+    };
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(loadedExtension("/ext/pi-claude-auth/src/index.ts")).toBeUndefined();
+  });
+
+  it("non-provider extensions never load under extensions: false", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    withProviderAuthRuntime();
+    loaderExtensionsRef.current.extensions.push({
+      path: "/ext/notify.ts",
+      tools: new Map([["notify_send", {}]]),
+      handlers: new Map([["session_start", [vi.fn()]]]),
+    } as never);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(loadedExtension("/ext/notify.ts")).toBeUndefined();
+    expect(lastToolsPassed()).not.toContain("notify_send");
+  });
+});
+
 // ─── exclude_extensions: denylist (#94) ──────────────────────────────────
 describe("agent-runner exclude_extensions", () => {
   function setupAgent(overrides: Record<string, unknown>) {
@@ -1857,7 +2039,7 @@ describe("agent-runner exclude_extensions", () => {
     ]);
   });
 
-  it("extensions: false + exclude — orphan warning, no override", async () => {
+  it("extensions: false + exclude — orphan warning, provider-auth retention override", async () => {
     setupAgent({ extensions: false, excludeExtensions: ["notify"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
@@ -1865,7 +2047,9 @@ describe("agent-runner exclude_extensions", () => {
 
     await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
 
-    expect(lastLoaderOpts().extensionsOverride).toBeUndefined();
+    // `extensions: false` used to leave no override at all; it now installs one
+    // solely so provider/auth extensions can keep their credential hooks.
+    expect(lastLoaderOpts().extensionsOverride).toEqual(expect.any(Function));
     expect(extensionErrors(onToolActivity)).toEqual([
       expect.stringContaining("exclude_extensions has no effect"),
     ]);
@@ -2078,6 +2262,7 @@ describe("agent-runner ext: tool selectors", () => {
 
     await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
 
+    // Only the explicitly resolved Claude auth entry loads at this boundary.
     expect(lastLoaderOpts().noExtensions).toBe(true);
     const tools = lastToolsPassed();
     expect(tools).toEqual(["read"]);
@@ -2154,6 +2339,7 @@ describe("agent-runner ext: tool selectors", () => {
     const tools = lastToolsPassed();
     expect(tools).toContain("read");
     expect(tools).not.toContain("foo_tool");
+    // Only the explicitly resolved Claude auth entry loads at this boundary.
     expect(lastLoaderOpts().noExtensions).toBe(true);
   });
 
