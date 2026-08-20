@@ -25,7 +25,7 @@ export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
 
 /** Default max concurrent background agents. */
-const DEFAULT_MAX_CONCURRENT = 4;
+const DEFAULT_MAX_CONCURRENT = 8;
 
 /**
  * How many evicted agents stay addressable by name. Only a bound on memory —
@@ -437,7 +437,7 @@ export class AgentManager {
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
-            session.steer(msg).catch(() => {});
+            session.steer(msg).catch(() => { });
           }
           record.pendingSteers = undefined;
         }
@@ -832,7 +832,7 @@ export class AgentManager {
     if (!record) return false;
     if (record.status !== "running" && record.status !== "queued") return false;
     if (record.session) {
-      record.session.steer(message).catch(() => {});
+      record.session.steer(message).catch(() => { });
       if (origin === "human") record.deadline?.reset?.();
     } else {
       if (!record.pendingSteers) record.pendingSteers = [];

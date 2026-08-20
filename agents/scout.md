@@ -9,6 +9,7 @@ model: [anthropic/claude-opus-5, anthropic/claude-sonnet-5, kimi-coding/k3, open
 thinking: low
 prompt_mode: replace
 max_duration: 5m
+run_in_background: true
 ---
 
 # READ-ONLY — NO FILE MODIFICATIONS

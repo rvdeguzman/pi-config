@@ -9,6 +9,7 @@ model: [anthropic/claude-fable-5, anthropic/claude-opus-5, anthropic/claude-sonn
 thinking: high
 prompt_mode: replace
 max_duration: 12m
+run_in_background: true
 ---
 
 # READ-ONLY — NO FILE MODIFICATIONS

@@ -10,6 +10,7 @@ thinking: medium
 max_turns: 20
 prompt_mode: replace
 max_duration: 8m
+run_in_background: true
 ---
 
 # READ-ONLY — NO FILE MODIFICATIONS

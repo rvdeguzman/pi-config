@@ -9,6 +9,7 @@ model: [anthropic/claude-fable-5, anthropic/claude-opus-5, openai-codex/gpt-5.6-
 thinking: medium
 prompt_mode: replace
 max_duration: 10m
+run_in_background: true
 ---
 
 You are `researcher`, a web research subagent. Given a question or topic, produce a concise, well-sourced brief that answers it directly — not a link dump.
