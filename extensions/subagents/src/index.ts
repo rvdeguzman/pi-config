@@ -29,7 +29,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
-import { type ModelRegistry, modelCandidates, resolveModel } from "./model-resolver.js";
+import { type ModelRegistry, modelCandidates, resolveModel, resolveModelChain } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, pruneOutputFiles, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
@@ -1564,30 +1564,33 @@ Terse command-style prompts produce shallow, generic work.
       });
 
       // Resolve model from agent config first; tool-call params only fill gaps.
-      let model = ctx.model;
+      let models = ctx.model ? [ctx.model] : [];
       if (resolvedConfig.modelInput) {
-        const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
+        const resolved = resolveModelChain(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
           if (resolvedConfig.modelFromParams) return textResult(resolved);
           // config-specified: silent fallback to parent
         } else {
-          model = resolved;
+          models = resolved;
         }
       }
+      const model = models[0];
 
       // Scope validation: the effective resolved model is checked against the
       // user's enabledModels list. Policy (hard error vs warn-and-proceed) lives
       // in model-scope.ts so the nested delegation tools apply the same rule.
-      const scopeVerdict = checkModelScope({
-        model,
-        cwd: ctx.cwd,
-        modelRegistry: ctx.modelRegistry,
-        callerSupplied: resolvedConfig.modelFromParams,
-        agentLabel: customConfig?.displayName ?? subagentType,
-        modelInput: resolvedConfig.modelInput,
-      });
-      if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
-      if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
+      for (const candidate of models.length > 0 ? models : [model]) {
+        const scopeVerdict = checkModelScope({
+          model: candidate,
+          cwd: ctx.cwd,
+          modelRegistry: ctx.modelRegistry,
+          callerSupplied: resolvedConfig.modelFromParams,
+          agentLabel: customConfig?.displayName ?? subagentType,
+          modelInput: resolvedConfig.modelInput,
+        });
+        if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
+        if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
+      }
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
@@ -1767,6 +1770,7 @@ Terse command-style prompts produce shallow, generic work.
           description: params.description,
           name: params.name as string | undefined,
           model,
+          models,
           maxTurns: effectiveMaxTurns,
           isolated,
           inheritContext,
@@ -1892,6 +1896,7 @@ Terse command-style prompts produce shallow, generic work.
           description: params.description,
           name: params.name as string | undefined,
           model,
+          models,
           maxTurns: effectiveMaxTurns,
           isolated,
           inheritContext,

@@ -216,6 +216,8 @@ export interface AgentRecord {
   recorder?: FlightRecorder;
   /** Wall-clock deadline state for the current run. See deadline.ts. */
   deadline?: DeadlineState;
+  /** Runtime model transitions, retained across resumed turns for diagnostics. */
+  modelFailovers?: Array<{ from: string; to: string; error: string }>;
   /**
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately

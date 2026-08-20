@@ -204,6 +204,38 @@ describe("child-safe nested Agent tools", () => {
       model: "anthropic/allowed",
     });
     expect(inScope.isError).toBe(false);
+
+    const blockedFallback = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/allowed, anthropic/blocked",
+    });
+    expect(blockedFallback.isError).toBe(true);
+    expect(blockedFallback.content[0].text).toContain("Model not in scope");
+  });
+
+  it("passes the full ordered model chain to a nested run", async () => {
+    const [agent] = tools();
+    const result = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/allowed, anthropic/blocked, anthropic/allowed",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(spawnAndWait).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), "scout", "Find them",
+      expect.objectContaining({
+        model: { provider: "anthropic", id: "allowed" },
+        models: [
+          { provider: "anthropic", id: "allowed" },
+          { provider: "anthropic", id: "blocked" },
+        ],
+      }),
+      expect.any(Function),
+    );
   });
 
   it("queues a steer for an owned child whose session is not ready yet", async () => {

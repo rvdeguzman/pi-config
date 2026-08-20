@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type ModelRegistry, resolveModel } from "../src/model-resolver.js";
+import { type ModelRegistry, resolveModel, resolveModelChain } from "../src/model-resolver.js";
 
 // Mock model entries matching typical pi model registry shape
 const MODELS = [
@@ -266,6 +266,31 @@ describe("resolveModel", () => {
       const result = resolveModel("anthropic/nope, openai/also-nope", makeRegistry([]));
       expect(typeof result).toBe("string");
       expect(result).toContain("anthropic/nope, openai/also-nope");
+    });
+
+    it("preserves every available candidate in configured order", () => {
+      const result = resolveModelChain(
+        "anthropic/claude-opus-4-6, openai/gpt-4o, anthropic/claude-sonnet-4-6",
+        makeRegistry(),
+      );
+      expect(result).toEqual([MODELS[0], MODELS[3], MODELS[1]]);
+    });
+
+    it("skips unavailable entries without truncating later fallbacks", () => {
+      const available = [MODELS[0], MODELS[1]];
+      const result = resolveModelChain(
+        "anthropic/claude-opus-4-6, openai/gpt-4o, anthropic/claude-sonnet-4-6",
+        makeRegistry(MODELS, available),
+      );
+      expect(result).toEqual([MODELS[0], MODELS[1]]);
+    });
+
+    it("deduplicates aliases that resolve to the same provider/model", () => {
+      const result = resolveModelChain(
+        "anthropic/claude-opus-4-6, opus, Claude Opus 4.6, openai/gpt-4o",
+        makeRegistry(),
+      );
+      expect(result).toEqual([MODELS[0], MODELS[3]]);
     });
   });
 

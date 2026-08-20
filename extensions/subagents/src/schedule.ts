@@ -20,7 +20,7 @@ import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
 import { resolveSpawnType } from "./agent-types.js";
-import { resolveModel } from "./model-resolver.js";
+import { resolveModelChain } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
 
@@ -231,10 +231,10 @@ export class SubagentScheduler {
     // Resolve model at fire time — registry contents may have changed since the
     // job was created (auth added/removed). Fall back silently to spawn-default
     // if resolution fails; the spawn path handles undefined model gracefully.
-    let resolvedModel: any | undefined;
+    let resolvedModels: any[] | undefined;
     if (job.model) {
-      const r = resolveModel(job.model, ctx.modelRegistry);
-      if (typeof r !== "string") resolvedModel = r;
+      const r = resolveModelChain(job.model, ctx.modelRegistry);
+      if (typeof r !== "string") resolvedModels = r;
     }
 
     let agentId: string;
@@ -251,7 +251,8 @@ export class SubagentScheduler {
         description: job.description,
         isBackground: true,
         bypassQueue: true,
-        model: resolvedModel,
+        model: resolvedModels?.[0],
+        models: resolvedModels,
         maxTurns: job.max_turns,
         isolated: job.isolated,
         thinkingLevel: job.thinking,

@@ -9,7 +9,7 @@
  *   error   → { success: false, error: string }
  */
 
-import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { type ModelRegistry, resolveModelChain } from "./model-resolver.js";
 
 /** Minimal event bus interface needed by the RPC handlers. */
 export interface EventBus {
@@ -98,14 +98,13 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
             `Model override "${normalizedOptions.model}" provided but ctx.modelRegistry is unavailable`,
           );
         }
-        const resolved = resolveModel(normalizedOptions.model, registry);
+        const resolved = resolveModelChain(normalizedOptions.model, registry);
         if (typeof resolved === "string") {
-          // resolveModel returns a human-readable error string when the
-          // input doesn't match any available model. Surface it instead of
-          // silently falling back so the caller sees the auth/typo issue.
+          // The resolver returns a human-readable error string when no candidate
+          // matches an available model. Surface the auth/typo issue to the caller.
           throw new Error(resolved);
         }
-        normalizedOptions = { ...normalizedOptions, model: resolved };
+        normalizedOptions = { ...normalizedOptions, model: resolved[0], models: resolved };
       }
 
       return { id: manager.spawn(pi, ctx, type, prompt, normalizedOptions) };

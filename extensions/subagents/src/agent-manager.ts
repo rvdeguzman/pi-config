@@ -12,7 +12,7 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { type ModelFailoverTransition, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { createFlightRecorder } from "./flight-recorder.js";
 import { assignHandle, handleBase } from "./mention.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
@@ -105,6 +105,8 @@ interface SpawnOptions {
    */
   reclaim?: { handle: string; alias?: string };
   model?: Model<any>;
+  /** Full ordered runtime-failover chain. */
+  models?: Model<any>[];
   maxTurns?: number;
   /**
    * Cap in ms on the resolved wall-clock budget — nested spawns pass the
@@ -147,6 +149,8 @@ interface SpawnOptions {
   onTurnEnd?: (turnCount: number) => void;
   /** Called once per assistant message_end with that message's usage delta. */
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called whenever the run advances to another configured model. */
+  onModelFailover?: (transition: ModelFailoverTransition) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
   /** Nesting depth: top-level subagent = 1. */
@@ -174,6 +178,8 @@ interface ResumeOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called once per assistant message_end with that message's usage delta. */
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called whenever the resumed run advances to another configured model. */
+  onModelFailover?: (transition: ModelFailoverTransition) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
   /**
@@ -194,6 +200,8 @@ export class AgentManager {
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
   private maxConcurrent: number;
+  /** Event buses retained so resumed runs surface model transitions too. */
+  private eventBuses = new Map<string, { emit(event: string, data: unknown): void }>();
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -293,6 +301,7 @@ export class AgentManager {
       rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
+    this.eventBuses.set(id, pi.events);
     // After the insert, so `takenHandles()` already counts this record's own
     // handle — a spawn named after its own type gets `explore-2`, not a
     // duplicate `explore` that would make resolution ambiguous.
@@ -314,6 +323,7 @@ export class AgentManager {
       this.startAgent(id, record, args);
     } catch (err) {
       this.agents.delete(id);
+      this.eventBuses.delete(id);
       throw err;
     }
     return id;
@@ -374,6 +384,7 @@ export class AgentManager {
       pi,
       agentId: id,
       model: options.model,
+      models: options.models,
       maxTurns: options.maxTurns,
       maxDurationCapMs: options.maxDurationCapMs,
       // Parked on the record so a HUMAN steer can reset the clock and nested
@@ -411,6 +422,10 @@ export class AgentManager {
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
         options.onAssistantUsage?.(usage);
+      },
+      onModelFailover: (transition) => {
+        this.recordModelFailover(id, record, transition);
+        options.onModelFailover?.(transition);
       },
       onCompaction: (info) => {
         record.compactionCount++;
@@ -565,6 +580,20 @@ export class AgentManager {
     }
   }
 
+  private recordModelFailover(
+    id: string,
+    record: AgentRecord,
+    transition: ModelFailoverTransition,
+  ): void {
+    if (!record.modelFailovers) record.modelFailovers = [];
+    record.modelFailovers.push(transition);
+    this.eventBuses.get(id)?.emit("subagents:model_failover", {
+      id,
+      type: record.type,
+      ...transition,
+    });
+  }
+
   /** Start queued agents up to the concurrency limit. */
   private drainQueue() {
     while (this.queue.length > 0 && this.runningBackground < this.maxConcurrent) {
@@ -689,6 +718,10 @@ export class AgentManager {
           addUsage(record.lifetimeUsage, usage);
           options?.onAssistantUsage?.(usage);
         },
+        onModelFailover: (transition) => {
+          this.recordModelFailover(id, record, transition);
+          options?.onModelFailover?.(transition);
+        },
         onCompaction: (info) => {
           record.compactionCount++;
           this.onCompact?.(record, info);
@@ -779,6 +812,10 @@ export class AgentManager {
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
         options.onAssistantUsage?.(usage);
+      },
+      onModelFailover: (transition) => {
+        this.recordModelFailover(id, record, transition);
+        options.onModelFailover?.(transition);
       },
       onCompaction: (info) => {
         record.compactionCount++;
@@ -941,6 +978,7 @@ export class AgentManager {
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
+    this.eventBuses.delete(id);
   }
 
   /**
@@ -1053,6 +1091,7 @@ export class AgentManager {
       record.session?.dispose();
     }
     this.agents.clear();
+    this.eventBuses.clear();
     // Prune any orphaned git worktrees (crash recovery)
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
     // Also prune repos that caller-supplied cwds created worktrees in — a clean

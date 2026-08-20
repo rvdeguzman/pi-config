@@ -264,7 +264,32 @@ describe("cross-extension RPC", () => {
       expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
       expect(manager.spawn).toHaveBeenCalledWith(
         deps.pi, ctx, "general-purpose", "x",
-        { model: fakeModel },
+        { model: fakeModel, models: [fakeModel] },
+      );
+    });
+
+    it("preserves an ordered string fallback chain for the spawned run", async () => {
+      const fallback = { id: "fallback", provider: "anthropic", name: "Fallback" };
+      ctx = {
+        session: true,
+        modelRegistry: {
+          find: (provider: string, id: string) => [fakeModel, fallback].find((model) => model.provider === provider && model.id === id),
+          getAll: () => [fakeModel, fallback],
+          getAvailable: () => [fakeModel, fallback],
+        },
+      };
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-chain", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-chain", type: "general-purpose", prompt: "x",
+        options: { model: "openai-codex/gpt-5.5, anthropic/fallback" },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "general-purpose", "x",
+        { model: fakeModel, models: [fakeModel, fallback] },
       );
     });
 

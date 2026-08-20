@@ -148,6 +148,7 @@ function createSession(finalText: string) {
   let activeToolNames: string[] = ["read", "bash", "edit", "write"];
   const session = {
     messages: [] as any[],
+    model: undefined as any,
     subscribe: vi.fn((listener: (event: any) => void) => {
       listeners.push(listener);
       return () => {};
@@ -160,6 +161,7 @@ function createSession(finalText: string) {
     }),
     abort: vi.fn(),
     steer: vi.fn(),
+    setModel: vi.fn(async (model: any) => { session.model = model; }),
     // Stateful, so the active set reflects what the scope installer actually did
     // and `renarrow`'s no-op guard behaves as it does against real pi.
     getActiveToolNames: vi.fn(() => activeToolNames),
@@ -511,6 +513,237 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
     const result = await runAgent(ctx, "Explore", "go", { pi });
 
     expect(result.responseText).toBe("STREAMED");
+  });
+});
+
+describe("runtime model failover", () => {
+  const primary = { provider: "anthropic", id: "primary", name: "Primary" } as any;
+  const secondary = { provider: "openai", id: "secondary", name: "Secondary" } as any;
+  const tertiary = { provider: "google", id: "tertiary", name: "Tertiary" } as any;
+
+  it("advances when session initialization fails before an AgentSession exists", async () => {
+    const { session } = createSession("");
+    session.model = secondary;
+    session.prompt.mockImplementationOnce(async (text: string) => {
+      expect(text).toBe("original");
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "initialized" }], stopReason: "stop" });
+    });
+    createAgentSession
+      .mockRejectedValueOnce(new Error("primary provider initialization failed"))
+      .mockResolvedValueOnce({ session });
+    const onModelFailover = vi.fn();
+
+    const result = await runAgent(ctx, "Explore", "original", {
+      pi,
+      models: [primary, secondary],
+      onModelFailover,
+    });
+
+    expect(createAgentSession).toHaveBeenCalledTimes(2);
+    expect(createAgentSession.mock.calls.map((args) => args[0].model)).toEqual([primary, secondary]);
+    expect(result.responseText).toBe("initialized");
+    expect(result.modelFailovers).toEqual([
+      { from: "anthropic/primary", to: "openai/secondary", error: "primary provider initialization failed" },
+    ]);
+    expect(onModelFailover).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues in the same session with a handoff and does not replay completed tools", async () => {
+    const { session } = createSession("");
+    let call = 0;
+    session.prompt.mockImplementation(async (text: string) => {
+      call++;
+      if (call === 1) {
+        session.messages.push(
+          { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: {} }], stopReason: "toolUse" },
+          { role: "toolResult", toolCallId: "t1", toolName: "edit", content: [{ type: "text", text: "edited once" }] },
+          { role: "assistant", content: [], stopReason: "error", errorMessage: "HTTP 429" },
+        );
+        return;
+      }
+      expect(text).toContain("Do not repeat completed tool calls");
+      expect(text).not.toBe("original task");
+      expect(session.messages.some((message) => message.role === "toolResult" && message.toolCallId === "t1")).toBe(true);
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "finished" }], stopReason: "stop" });
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "original task", { pi, models: [primary, secondary] });
+
+    expect(createAgentSession).toHaveBeenCalledTimes(1);
+    expect(session.setModel).toHaveBeenCalledWith(secondary);
+    expect(result.responseText).toBe("finished");
+    expect(result.failure).toBeUndefined();
+    expect(result.modelFailovers).toEqual([
+      { from: "anthropic/primary", to: "openai/secondary", error: "HTTP 429" },
+    ]);
+  });
+
+  it("fails over thrown HTTP/stream errors after prompt acceptance", async () => {
+    const { session } = createSession("");
+    session.prompt
+      .mockImplementationOnce(async (_text: string, options: any) => {
+        options.preflightResult(true);
+        throw new Error("HTTP 429: stream reset");
+      })
+      .mockImplementationOnce(async (text: string) => {
+        expect(text).toContain("Continue the existing task");
+        session.messages.push({ role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "stop" });
+      });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "original", { pi, models: [primary, secondary] });
+
+    expect(result.responseText).toBe("recovered");
+    expect(session.setModel).toHaveBeenCalledWith(secondary);
+  });
+
+  it("re-submits the original prompt only when auth/init preflight rejected it", async () => {
+    const { session } = createSession("");
+    session.prompt
+      .mockImplementationOnce(async (_text: string, options: any) => {
+        options.preflightResult(false);
+        throw new Error("Authentication failed");
+      })
+      .mockImplementationOnce(async (text: string) => {
+        expect(text).toBe("original");
+        session.messages.push({ role: "assistant", content: [{ type: "text", text: "authenticated" }], stopReason: "stop" });
+      });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "original", { pi, models: [primary, secondary] });
+
+    expect(result.responseText).toBe("authenticated");
+  });
+
+  it("skips a fallback whose model initialization fails", async () => {
+    const { session } = createSession("");
+    session.prompt
+      .mockImplementationOnce(async () => {
+        session.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "overloaded" });
+      })
+      .mockImplementationOnce(async () => {
+        session.messages.push({ role: "assistant", content: [{ type: "text", text: "third model worked" }], stopReason: "stop" });
+      });
+    session.setModel
+      .mockRejectedValueOnce(new Error("No API key for openai/secondary"))
+      .mockImplementationOnce(async (model: any) => { session.model = model; });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi, models: [primary, secondary, tertiary] });
+
+    expect(session.setModel.mock.calls.map((args) => args[0])).toEqual([secondary, tertiary]);
+    expect(result.responseText).toBe("third model worked");
+    expect(result.modelFailovers).toHaveLength(2);
+  });
+
+  it("aggregates every model failure when the chain is exhausted", async () => {
+    const { session } = createSession("");
+    session.prompt
+      .mockImplementationOnce(async () => {
+        session.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "rate limited" });
+      })
+      .mockImplementationOnce(async () => {
+        session.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "stream failed" });
+      });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi, models: [primary, secondary] });
+
+    expect(result.failure).toContain("All model attempts failed");
+    expect(result.failure).toContain("anthropic/primary: rate limited");
+    expect(result.failure).toContain("openai/secondary: stream failed");
+  });
+
+  it("fails over an empty output-limit failure", async () => {
+    const { session } = createSession("");
+    session.prompt
+      .mockImplementationOnce(async () => {
+        session.messages.push({ role: "assistant", content: [], stopReason: "length" });
+      })
+      .mockImplementationOnce(async () => {
+        session.messages.push({ role: "assistant", content: [{ type: "text", text: "within limit" }], stopReason: "stop" });
+      });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi, models: [primary, secondary] });
+
+    expect(result.responseText).toBe("within limit");
+    expect(session.setModel).toHaveBeenCalledWith(secondary);
+  });
+
+  it("does not fail over on cancellation or an aborted stop reason", async () => {
+    const controller = new AbortController();
+    const { session } = createSession("");
+    session.prompt.mockImplementationOnce(async () => {
+      controller.abort();
+      session.messages.push({ role: "assistant", content: [], stopReason: "aborted" });
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", {
+      pi,
+      models: [primary, secondary],
+      signal: controller.signal,
+    });
+
+    expect(result.failure).toBeUndefined();
+    expect(session.setModel).not.toHaveBeenCalled();
+    expect(result.modelFailovers).toEqual([]);
+  });
+
+  it("shares turn and usage accounting across attempts", async () => {
+    const { session, listeners } = createSession("");
+    const onTurnEnd = vi.fn();
+    const onAssistantUsage = vi.fn();
+    let call = 0;
+    session.prompt.mockImplementation(async () => {
+      call++;
+      const message = call === 1
+        ? { role: "assistant", content: [], stopReason: "error", errorMessage: "first failed", usage: { input: 10, output: 1, cacheWrite: 2 } }
+        : { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop", usage: { input: 20, output: 2, cacheWrite: 3 } };
+      session.messages.push(message);
+      for (const listener of [...listeners]) {
+        listener({ type: "message_end", message });
+        listener({ type: "turn_end", message, toolResults: [] });
+      }
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", {
+      pi,
+      models: [primary, secondary],
+      maxTurns: 10,
+      onTurnEnd,
+      onAssistantUsage,
+    });
+
+    expect(result.responseText).toBe("done");
+    expect(onTurnEnd.mock.calls.map((args) => args[0])).toEqual([1, 2]);
+    expect(onAssistantUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the remaining chain available to resumed runs", async () => {
+    const { session } = createSession("");
+    let call = 0;
+    session.prompt.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        session.messages.push({ role: "assistant", content: [{ type: "text", text: "initial" }], stopReason: "stop" });
+      } else if (call === 2) {
+        session.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "resume rate limit" });
+      } else {
+        session.messages.push({ role: "assistant", content: [{ type: "text", text: "resumed" }], stopReason: "stop" });
+      }
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "start", { pi, models: [primary, secondary] });
+    const resumed = await resumeAgent(session as any, "continue");
+
+    expect(resumed.text).toBe("resumed");
+    expect(session.setModel).toHaveBeenCalledWith(secondary);
+    expect(resumed.modelFailovers).toHaveLength(1);
   });
 });
 
@@ -2477,6 +2710,25 @@ describe("agent-runner turn limits", () => {
     expect(session.steer).toHaveBeenCalledTimes(1);
     expect(session.abort).toHaveBeenCalled();
     expect(result.aborted).toBe(true);
+  });
+
+  it("does not fail over after a hard turn-limit abort", async () => {
+    setGraceTurns(1);
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const primary = { provider: "anthropic", id: "primary" } as any;
+    const fallback = { provider: "openai", id: "fallback" } as any;
+    const { session, listeners } = createSession("");
+    session.prompt.mockImplementation(async () => {
+      for (const listener of [...listeners]) listener({ type: "turn_end" });
+      for (const listener of [...listeners]) listener({ type: "turn_end" });
+      session.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "late provider error" });
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi, models: [primary, fallback], maxTurns: 1 });
+
+    expect(result.aborted).toBe(true);
+    expect(session.setModel).not.toHaveBeenCalled();
   });
 
   it("keeps running through the grace window without aborting", async () => {

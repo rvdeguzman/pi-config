@@ -24,7 +24,7 @@ import { buildParentContext, extractText } from "./context.js";
 import { createDeadline, type Deadline, formatDurationMs, getDefaultMaxDurationMs, normalizeMaxDurationMs } from "./deadline.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
-import { modelCandidates } from "./model-resolver.js";
+import { modelCandidates, resolveModelChain } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
@@ -445,29 +445,44 @@ export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
  * `configModel` may be a comma-separated fallback list, tried left to right;
  * the parent model is the last resort when no candidate is found or available.
  */
-export function resolveDefaultModel(
+export function resolveDefaultModels(
   parentModel: Model<any> | undefined,
   registry: { find(provider: string, modelId: string): Model<any> | undefined; getAvailable?(): Model<any>[] },
   configModel?: string,
-): Model<any> | undefined {
-  // Build a set of available model keys for fast lookup
+): Model<any>[] {
   const available = registry.getAvailable?.();
   const availableKeys = available
-    ? new Set(available.map((m: any) => `${m.provider}/${m.id}`))
+    ? new Set(available.map((m: any) => `${m.provider}/${m.id}`.toLowerCase()))
     : undefined;
+  const models: Model<any>[] = [];
+  const seen = new Set<string>();
 
   for (const candidate of configModel ? modelCandidates(configModel) : []) {
     const slashIdx = candidate.indexOf("/");
     if (slashIdx === -1) continue;
     const provider = candidate.slice(0, slashIdx);
     const modelId = candidate.slice(slashIdx + 1);
-    if (availableKeys && !availableKeys.has(`${provider}/${modelId}`)) continue;
+    const key = `${provider}/${modelId}`.toLowerCase();
+    if (availableKeys && !availableKeys.has(key)) continue;
 
     const found = registry.find(provider, modelId);
-    if (found) return found;
+    if (!found) continue;
+    const foundKey = `${found.provider}/${found.id}`.toLowerCase();
+    if (seen.has(foundKey)) continue;
+    seen.add(foundKey);
+    models.push(found);
   }
 
-  return parentModel;
+  if (models.length > 0) return models;
+  return parentModel ? [parentModel] : [];
+}
+
+export function resolveDefaultModel(
+  parentModel: Model<any> | undefined,
+  registry: { find(provider: string, modelId: string): Model<any> | undefined; getAvailable?(): Model<any>[] },
+  configModel?: string,
+): Model<any> | undefined {
+  return resolveDefaultModels(parentModel, registry, configModel)[0];
 }
 
 /** Info about a tool event in the subagent. */
@@ -492,6 +507,8 @@ export interface RunOptions {
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
   model?: Model<any>;
+  /** Full ordered runtime-failover chain. `model` remains the compatibility primary. */
+  models?: Model<any>[];
   maxTurns?: number;
   /**
    * Upper bound in ms applied AFTER the frontmatter/default wall-clock budget
@@ -563,6 +580,8 @@ export interface RunOptions {
    * (which replaces session.state.messages and resets stats-derived sums).
    */
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called whenever an attempt advances to the next configured model. */
+  onModelFailover?: (transition: ModelFailoverTransition) => void;
   /**
    * Called when the session successfully compacts. `tokensBefore` is upstream's
    * pre-compaction context size estimate. Aborted compactions don't fire.
@@ -575,6 +594,17 @@ export interface RunOptions {
     depth: number;
     maxSubagentDepth?: number;
   };
+}
+
+export interface ModelAttemptFailure {
+  model: string;
+  error: string;
+}
+
+export interface ModelFailoverTransition {
+  from: string;
+  to: string;
+  error: string;
 }
 
 export interface RunResult {
@@ -598,6 +628,8 @@ export interface RunResult {
    * stop that produced text (a legitimate truncated answer).
    */
   failure?: string;
+  /** Every runtime model transition made during this invocation. */
+  modelFailovers: ModelFailoverTransition[];
 }
 
 /**
@@ -666,10 +698,160 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
   return undefined;
 }
 
-/**
- * Wire an AbortSignal to abort a session.
- * Returns a cleanup function to remove the listener.
- */
+interface SessionModelChainState {
+  models: Model<any>[];
+  index: number;
+  pendingFailures: ModelAttemptFailure[];
+  pendingTransitions: ModelFailoverTransition[];
+}
+
+const sessionModelChains = new WeakMap<AgentSession, SessionModelChainState>();
+
+function modelKey(model: Pick<Model<any>, "provider" | "id">): string {
+  return `${model.provider}/${model.id}`;
+}
+
+function deduplicateModels(models: Array<Model<any> | undefined>): Model<any>[] {
+  const result: Model<any>[] = [];
+  const seen = new Set<string>();
+  for (const model of models) {
+    if (!model) continue;
+    const key = modelKey(model).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(model);
+  }
+  return result;
+}
+
+function initializeSessionModelChain(
+  session: AgentSession,
+  configured: Model<any>[],
+  pendingFailures: ModelAttemptFailure[] = [],
+  pendingTransitions: ModelFailoverTransition[] = [],
+  initialIndex = 0,
+): SessionModelChainState {
+  const current = session.model;
+  const models = deduplicateModels(configured);
+  let index = current
+    ? models.findIndex((model) => modelKey(model).toLowerCase() === modelKey(current).toLowerCase())
+    : initialIndex;
+  if (current && index === -1) {
+    models.unshift(current);
+    index = 0;
+  }
+  const state = {
+    models,
+    index: Math.max(0, index),
+    pendingFailures: [...pendingFailures],
+    pendingTransitions: [...pendingTransitions],
+  };
+  sessionModelChains.set(session, state);
+  return state;
+}
+
+function getSessionModelChain(session: AgentSession): SessionModelChainState {
+  return sessionModelChains.get(session) ?? initializeSessionModelChain(session, session.model ? [session.model] : []);
+}
+
+function aggregateModelFailures(failures: ModelAttemptFailure[]): string | undefined {
+  if (failures.length === 0) return undefined;
+  if (failures.length === 1) return failures[0].error;
+  return `All model attempts failed:\n${failures.map(({ model, error }) => `- ${model}: ${error}`).join("\n")}`;
+}
+
+function finalAttemptState(
+  session: AgentSession,
+  startIndex: number,
+): { failure?: string; aborted: boolean } {
+  for (let i = session.messages.length - 1; i >= startIndex; i--) {
+    const msg = session.messages[i];
+    if (msg.role !== "assistant") continue;
+    if (msg.stopReason === "aborted") return { aborted: true };
+    return { failure: finalTurnError(session, startIndex), aborted: false };
+  }
+  return { aborted: false };
+}
+
+const FAILOVER_HANDOFF = (model: string, error: string): string =>
+  `The previous model attempt (${model}) failed: ${error}. Continue the existing task from the conversation state. ` +
+  "Do not repeat completed tool calls or side effects; use the existing tool results and finish the task.";
+
+async function promptWithModelFailover(
+  session: AgentSession,
+  prompt: string,
+  options: {
+    signal?: AbortSignal;
+    shouldStop?: () => boolean;
+    onModelFailover?: (transition: ModelFailoverTransition) => void;
+  },
+): Promise<{ failure?: string; modelFailovers: ModelFailoverTransition[] }> {
+  const state = getSessionModelChain(session);
+  const failures = state.pendingFailures.splice(0);
+  const modelFailovers = state.pendingTransitions.splice(0);
+  let nextPrompt = prompt;
+  let isHandoff = false;
+
+  for (;;) {
+    const attemptStart = session.messages.length;
+    const currentModel = state.models[state.index] ?? session.model;
+    const currentLabel = currentModel ? modelKey(currentModel) : "current model";
+    let accepted = true;
+    let failure: string | undefined;
+
+    try {
+      await session.prompt(nextPrompt, {
+        ...(isHandoff && { expandPromptTemplates: false, source: "extension" as const }),
+        preflightResult: (success) => { accepted = success; },
+      });
+    } catch (err) {
+      if (options.signal?.aborted || options.shouldStop?.()) throw err;
+      failure = err instanceof Error ? err.message : String(err);
+    }
+
+    if (!failure) {
+      const terminal = finalAttemptState(session, attemptStart);
+      if (terminal.aborted || options.signal?.aborted || options.shouldStop?.()) {
+        return { modelFailovers };
+      }
+      failure = terminal.failure;
+    }
+    if (!failure) return { modelFailovers };
+
+    failures.push({ model: currentLabel, error: failure });
+    nextPrompt = accepted ? FAILOVER_HANDOFF(currentLabel, failure) : prompt;
+    isHandoff = accepted;
+
+    let switched = false;
+    let transitionFrom = currentLabel;
+    while (++state.index < state.models.length) {
+      const nextModel = state.models[state.index];
+      const nextLabel = modelKey(nextModel);
+      const transition = { from: transitionFrom, to: nextLabel, error: failure };
+      modelFailovers.push(transition);
+      options.onModelFailover?.(transition);
+
+      try {
+        await session.setModel(nextModel);
+        if (options.signal?.aborted || options.shouldStop?.()) return { modelFailovers };
+        switched = true;
+        break;
+      } catch (err) {
+        if (options.signal?.aborted || options.shouldStop?.()) throw err;
+        const switchFailure = err instanceof Error ? err.message : String(err);
+        failures.push({ model: nextLabel, error: switchFailure });
+        failure = switchFailure;
+        transitionFrom = nextLabel;
+      }
+    }
+
+    if (!switched) {
+      return { failure: aggregateModelFailures(failures), modelFailovers };
+    }
+  }
+}
+
+/** Wire an AbortSignal to abort a session and return its listener cleanup. */
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
   const onAbort = () => session.abort();
@@ -922,10 +1104,20 @@ export async function runAgent(
     }
   }
 
-  // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
-    ctx.model, ctx.modelRegistry, agentConfig?.model,
+  // Resolve the full runtime-failover chain: explicit options > config.model > parent model.
+  const models = deduplicateModels(
+    options.models?.length
+      ? options.models
+      : options.model
+        ? [options.model]
+        : agentConfig?.model
+          ? (() => {
+              const resolved = resolveModelChain(agentConfig.model!, ctx.modelRegistry);
+              return typeof resolved === "string" ? (ctx.model ? [ctx.model] : []) : resolved;
+            })()
+          : (ctx.model ? [ctx.model] : []),
   );
+  const model = models[0];
 
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
@@ -1070,7 +1262,43 @@ export async function runAgent(
     sessionOpts.thinkingLevel = thinkingLevel;
   }
 
-  const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  let session: AgentSession | undefined;
+  let initialModelIndex = 0;
+  const initializationFailures: ModelAttemptFailure[] = [];
+  const initializationTransitions: ModelFailoverTransition[] = [];
+  const initializationCandidates = models.length > 0 ? models : [undefined];
+
+  for (let i = 0; i < initializationCandidates.length; i++) {
+    const candidate = initializationCandidates[i];
+    const attemptSessionOpts = { ...sessionOpts, model: candidate };
+    try {
+      const created = await runInChildSessionContext(() => createAgentSession(attemptSessionOpts));
+      session = created.session;
+      initialModelIndex = i;
+      break;
+    } catch (err) {
+      if (options.signal?.aborted) throw err;
+      const error = err instanceof Error ? err.message : String(err);
+      const label = candidate ? modelKey(candidate) : "current model";
+      initializationFailures.push({ model: label, error });
+      const next = initializationCandidates[i + 1];
+      if (!next) throw new Error(aggregateModelFailures(initializationFailures) ?? error);
+      const transition = { from: label, to: modelKey(next), error };
+      initializationTransitions.push(transition);
+      options.onModelFailover?.(transition);
+    }
+  }
+
+  if (!session) {
+    throw new Error(aggregateModelFailures(initializationFailures) ?? "Agent session initialization failed");
+  }
+  initializeSessionModelChain(
+    session,
+    models,
+    initializationFailures,
+    initializationTransitions,
+    initialModelIndex,
+  );
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -1201,8 +1429,13 @@ export async function runAgent(
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
   deadline?.arm();
+  let attemptResult: { failure?: string; modelFailovers: ModelFailoverTransition[] };
   try {
-    await session.prompt(effectivePrompt);
+    attemptResult = await promptWithModelFailover(session, effectivePrompt, {
+      signal: options.signal,
+      shouldStop: () => aborted || (deadline?.exceeded() ?? false),
+      onModelFailover: options.onModelFailover,
+    });
   } finally {
     deadline?.clear();
     unsubTurns();
@@ -1218,7 +1451,8 @@ export async function runAgent(
     steered: softLimitReached || (deadline?.softFired() ?? false),
     deadlineExceeded: deadline?.exceeded() ?? false,
     deadlineSteered: deadline?.softFired() ?? false,
-    failure: finalTurnError(session, startLen),
+    failure: attemptResult.failure,
+    modelFailovers: attemptResult.modelFailovers,
   };
 }
 
@@ -1232,9 +1466,10 @@ export async function resumeAgent(
     onToolActivity?: (activity: ToolActivity) => void;
     onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+    onModelFailover?: (transition: ModelFailoverTransition) => void;
     signal?: AbortSignal;
   } = {},
-): Promise<{ text: string; failure?: string }> {
+): Promise<{ text: string; failure?: string; modelFailovers: ModelFailoverTransition[] }> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
@@ -1260,8 +1495,12 @@ export async function resumeAgent(
       })
     : () => {};
 
+  let attemptResult: { failure?: string; modelFailovers: ModelFailoverTransition[] };
   try {
-    await session.prompt(prompt);
+    attemptResult = await promptWithModelFailover(session, prompt, {
+      signal: options.signal,
+      onModelFailover: options.onModelFailover,
+    });
   } finally {
     collector.unsubscribe();
     unsubEvents();
@@ -1270,7 +1509,8 @@ export async function resumeAgent(
 
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
-    failure: finalTurnError(session, startLen),
+    failure: attemptResult.failure,
+    modelFailovers: attemptResult.modelFailovers,
   };
 }
 

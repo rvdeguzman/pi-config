@@ -16,7 +16,7 @@ import {
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { resolveModel } from "./model-resolver.js";
+import { resolveModelChain } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import {
   createOutputFilePath,
@@ -51,6 +51,7 @@ const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as 
 interface NestedSpawnOptions {
   description: string;
   model?: Model<any>;
+  models?: Model<any>[];
   maxTurns?: number;
   /** Cap on the child's wall-clock budget — the parent's remaining lifetime. */
   maxDurationCapMs?: number;
@@ -221,28 +222,31 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       const invocation = resolveAgentInvocationConfig(config, params, {
         worktreeAllowed: isWorktreeIsolationEnabled(),
       });
-      let model = ctx.model;
+      let models = ctx.model ? [ctx.model] : [];
       if (invocation.modelInput) {
-        const resolvedModel = resolveModel(invocation.modelInput, ctx.modelRegistry);
-        if (typeof resolvedModel === "string") {
-          if (invocation.modelFromParams) return textResult(resolvedModel, true);
+        const resolvedModels = resolveModelChain(invocation.modelInput, ctx.modelRegistry);
+        if (typeof resolvedModels === "string") {
+          if (invocation.modelFromParams) return textResult(resolvedModels, true);
         } else {
-          model = resolvedModel;
+          models = resolvedModels;
         }
       }
+      const model = models[0];
 
       // Same scopeModels policy as the top-level Agent tool — a nested spawn
       // must not escape the allowlist. A "warn" verdict proceeds silently:
       // child sessions have no UI surface to toast to.
-      const scopeVerdict = checkModelScope({
-        model,
-        cwd: context.configCwd,
-        modelRegistry: ctx.modelRegistry,
-        callerSupplied: invocation.modelFromParams,
-        agentLabel: config?.displayName ?? resolvedType,
-        modelInput: invocation.modelInput,
-      });
-      if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message, true);
+      for (const candidate of models.length > 0 ? models : [model]) {
+        const scopeVerdict = checkModelScope({
+          model: candidate,
+          cwd: context.configCwd,
+          modelRegistry: ctx.modelRegistry,
+          callerSupplied: invocation.modelFromParams,
+          agentLabel: config?.displayName ?? resolvedType,
+          modelInput: invocation.modelInput,
+        });
+        if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message, true);
+      }
 
       // The whole branch shares the root session's transcript directory; read it
       // off the owning parent rather than this child session's own id.
@@ -251,6 +255,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       const options: NestedSpawnOptions = {
         description: params.description,
         model,
+        models,
         maxTurns: invocation.maxTurns,
         // A child must not outlive its parent's wall-clock deadline: cap its
         // resolved budget at the parent's remaining lifetime. Undefined when

@@ -118,6 +118,53 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
   });
 });
 
+describe("AgentManager — runtime model failover diagnostics", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("forwards the full chain and surfaces every transition on the record and event bus", async () => {
+    const first = { provider: "anthropic", id: "first" } as any;
+    const second = { provider: "openai", id: "second" } as any;
+    const events = { emit: vi.fn() };
+    vi.mocked(runAgent).mockImplementationOnce(async (_ctx, _type, _prompt, options) => {
+      options.onModelFailover?.({ from: "anthropic/first", to: "openai/second", error: "HTTP 429" });
+      return {
+        responseText: "done",
+        session: mockSession(),
+        aborted: false,
+        steered: false,
+        deadlineExceeded: false,
+        deadlineSteered: false,
+        modelFailovers: [],
+      };
+    });
+    manager = new AgentManager();
+
+    const id = manager.spawn({ events } as any, mockCtx, "general-purpose", "test", {
+      description: "test",
+      model: first,
+      models: [first, second],
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(vi.mocked(runAgent).mock.calls.at(-1)?.[3]).toEqual(expect.objectContaining({
+      model: first,
+      models: [first, second],
+    }));
+    expect(manager.getRecord(id)?.modelFailovers).toEqual([
+      { from: "anthropic/first", to: "openai/second", error: "HTTP 429" },
+    ]);
+    expect(events.emit).toHaveBeenCalledWith("subagents:model_failover", {
+      id,
+      type: "general-purpose",
+      from: "anthropic/first",
+      to: "openai/second",
+      error: "HTTP 429",
+    });
+  });
+});
+
 describe("AgentManager — spawnAndWait onSpawned + foreground output file wiring (#105)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());

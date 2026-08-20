@@ -325,6 +325,29 @@ describe("SubagentScheduler — fire path", () => {
     expect(optsArg.isBackground).toBe(true);
   });
 
+  it("resolves and passes the full model chain at fire time", () => {
+    const first = { provider: "anthropic", id: "first", name: "First" };
+    const second = { provider: "openai", id: "second", name: "Second" };
+    ctx.modelRegistry = {
+      find: (provider: string, id: string) => [first, second].find((model) => model.provider === provider && model.id === id),
+      getAll: () => [first, second],
+      getAvailable: () => [first, second],
+    };
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+    scheduler.addJob({
+      name: "with-models", description: "x", schedule: "1s",
+      subagent_type: "general-purpose", prompt: "x",
+      model: "anthropic/first, openai/second, anthropic/first",
+    });
+
+    vi.advanceTimersByTime(1_000);
+
+    const optsArg = manager.spawn.mock.calls[0][4];
+    expect(optsArg.model).toBe(first);
+    expect(optsArg.models).toEqual([first, second]);
+  });
+
   it("disabled jobs do not fire", () => {
     const job = scheduler.addJob({
       name: "off", description: "x", schedule: "1s",

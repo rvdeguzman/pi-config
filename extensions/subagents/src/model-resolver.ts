@@ -34,13 +34,38 @@ export function resolveModel(
   input: string,
   registry: ModelRegistry,
 ): any | string {
+  const resolved = resolveModelChain(input, registry);
+  return typeof resolved === "string" ? resolved : resolved[0];
+}
+
+/**
+ * Resolve every available model in a fallback list, preserving configured order
+ * while deduplicating aliases that resolve to the same provider/model id.
+ * Unavailable candidates are skipped; an error is returned only when none of
+ * the candidates can run.
+ */
+export function resolveModelChain(
+  input: string,
+  registry: ModelRegistry,
+): any[] | string {
   const candidates = modelCandidates(input);
+  const resolvedModels: any[] = [];
+  const seen = new Set<string>();
   let lastError = `Model not found: "${input}".`;
+
   for (const candidate of candidates) {
     const resolved = resolveOne(candidate, registry);
-    if (typeof resolved !== "string") return resolved;
-    lastError = resolved;
+    if (typeof resolved === "string") {
+      lastError = resolved;
+      continue;
+    }
+    const key = `${resolved.provider}/${resolved.id}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    resolvedModels.push(resolved);
   }
+
+  if (resolvedModels.length > 0) return resolvedModels;
   return candidates.length > 1
     ? `No model resolved from the fallback list "${input}".\n\n${lastError}`
     : lastError;
