@@ -1,14 +1,7 @@
 {
+  "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": "src",
-    "declaration": true
+    "plugins": [{ "name": "@effect/language-service" }]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["index.ts", "src/**/*.ts", "*.test.ts"]
 }
