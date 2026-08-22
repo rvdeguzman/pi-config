@@ -10,7 +10,9 @@ import net from "node:net";
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
 const socketEndpoint =
-  process.platform === "win32" && socketPath ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+  process.platform === "win32" && socketPath
+    ? `\\\\.\\pipe\\${socketPath}`
+    : socketPath;
 const paneId = process.env.HERDR_PANE_ID;
 const source = "herdr:pi";
 
@@ -18,7 +20,10 @@ function enabled() {
   return HERDR_ENV === "1" && !!socketPath && !!paneId;
 }
 
-function sendRequestAttempt(request: unknown, timeoutMs: number): Promise<boolean> {
+function sendRequestAttempt(
+  request: unknown,
+  timeoutMs: number,
+): Promise<boolean> {
   if (!enabled()) {
     return Promise.resolve(true);
   }
@@ -81,13 +86,16 @@ function updateSessionRef(ctx: any): void {
 
   try {
     const id = ctx?.sessionManager?.getSessionId?.();
-    currentAgentSessionId = typeof id === "string" && id.length > 0 ? id : undefined;
+    currentAgentSessionId =
+      typeof id === "string" && id.length > 0 ? id : undefined;
   } catch {
     currentAgentSessionId = undefined;
   }
 }
 
-function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
+function withSessionRef(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
   if (currentAgentSessionPath) {
     return { ...params, agent_session_path: currentAgentSessionPath };
   }
@@ -127,7 +135,11 @@ function reportSession(sessionStartSource?: string): Promise<void> {
   });
 }
 
-function sendState(state: AgentState, message?: string, seq = nextReportSeq()): Promise<void> {
+function sendState(
+  state: AgentState,
+  message?: string,
+  seq = nextReportSeq(),
+): Promise<void> {
   return sendRequest({
     id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
     method: "pane.report_agent",

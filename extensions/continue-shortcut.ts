@@ -9,15 +9,22 @@ Continue.
 </system-notice>`;
 
 export default function continueShortcut(pi: ExtensionAPI) {
-	pi.on("input", async (event) => {
-		if (event.source === "extension" || ![".", "c"].includes(event.text.trim())) {
-			return { action: "continue" };
-		}
+  pi.on("input", async (event) => {
+    if (
+      event.source === "extension" ||
+      ![".", "c"].includes(event.text.trim())
+    ) {
+      return { action: "continue" };
+    }
 
-		await pi.sendMessage(
-			{ customType: "manual-continue", content: CONTINUE_PROMPT, display: false },
-			{ triggerTurn: true, deliverAs: "steer" },
-		);
-		return { action: "handled" };
-	});
+    await pi.sendMessage(
+      {
+        customType: "manual-continue",
+        content: CONTINUE_PROMPT,
+        display: false,
+      },
+      { triggerTurn: true, deliverAs: "steer" },
+    );
+    return { action: "handled" };
+  });
 }

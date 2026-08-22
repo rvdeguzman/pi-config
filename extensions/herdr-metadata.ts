@@ -8,61 +8,71 @@
  */
 
 import net from "node:net";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 const socketPath = process.env.HERDR_SOCKET_PATH;
-const endpoint = process.platform === "win32" && socketPath ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+const endpoint =
+  process.platform === "win32" && socketPath
+    ? `\\\\.\\pipe\\${socketPath}`
+    : socketPath;
 const paneId = process.env.HERDR_PANE_ID;
 const source = "user:pi-metadata";
 
 const enabled = () => process.env.HERDR_ENV === "1" && !!socketPath && !!paneId;
 
 function send(params: Record<string, unknown>) {
-	if (!enabled()) return;
-	const request = {
-		id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-		method: "pane.report_metadata",
-		params: { pane_id: paneId, source, agent: "pi", ...params },
-	};
-	const socket = net.createConnection(endpoint!);
-	const timeout = setTimeout(() => socket.destroy(), 1000);
-	timeout.unref?.();
-	socket.on("error", () => socket.destroy());
-	socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
-	socket.on("data", () => {
-		clearTimeout(timeout);
-		socket.destroy();
-	});
+  if (!enabled()) return;
+  const request = {
+    id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    method: "pane.report_metadata",
+    params: { pane_id: paneId, source, agent: "pi", ...params },
+  };
+  const socket = net.createConnection(endpoint!);
+  const timeout = setTimeout(() => socket.destroy(), 1000);
+  timeout.unref?.();
+  socket.on("error", () => socket.destroy());
+  socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+  socket.on("data", () => {
+    clearTimeout(timeout);
+    socket.destroy();
+  });
 }
 
 function usageTokens(ctx: ExtensionContext): Record<string, string> {
-	let cost = 0;
-	for (const entry of ctx.sessionManager.getEntries()) {
-		let usage;
-		if (entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult")) {
-			usage = entry.message.usage;
-		} else if (entry.type === "compaction" || entry.type === "branch_summary") {
-			usage = entry.usage;
-		}
-		if (usage) cost += usage.cost.total;
-	}
-	const context = ctx.getContextUsage();
-	const tokens: Record<string, string> = { cost: `$${cost.toFixed(2)}` };
-	if (ctx.model?.id) tokens.model = ctx.model.id;
-	if (context?.percent != null) tokens.ctx = `${context.percent.toFixed(0)}%`;
-	return tokens;
+  let cost = 0;
+  for (const entry of ctx.sessionManager.getEntries()) {
+    let usage;
+    if (
+      entry.type === "message" &&
+      (entry.message.role === "assistant" ||
+        entry.message.role === "toolResult")
+    ) {
+      usage = entry.message.usage;
+    } else if (entry.type === "compaction" || entry.type === "branch_summary") {
+      usage = entry.usage;
+    }
+    if (usage) cost += usage.cost.total;
+  }
+  const context = ctx.getContextUsage();
+  const tokens: Record<string, string> = { cost: `$${cost.toFixed(2)}` };
+  if (ctx.model?.id) tokens.model = ctx.model.id;
+  if (context?.percent != null) tokens.ctx = `${context.percent.toFixed(0)}%`;
+  return tokens;
 }
 
 export default function herdrMetadata(pi: ExtensionAPI) {
-	if (!enabled()) return;
+  if (!enabled()) return;
 
-	pi.on("agent_start", (_event, ctx) => {
-		if (ctx.mode !== "tui") return;
-		send({ title: "pi", tokens: usageTokens(ctx) });
-	});
+  pi.on("agent_start", (_event, ctx) => {
+    if (ctx.mode !== "tui") return;
+    send({ title: "pi", tokens: usageTokens(ctx) });
+  });
 
-	pi.on("agent_settled", (_event, ctx) => {
-		if (ctx.mode !== "tui") return;
-		send({ tokens: usageTokens(ctx) });
-	});
+  pi.on("agent_settled", (_event, ctx) => {
+    if (ctx.mode !== "tui") return;
+    send({ tokens: usageTokens(ctx) });
+  });
 }
