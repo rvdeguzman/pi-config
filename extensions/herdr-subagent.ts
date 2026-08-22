@@ -94,6 +94,8 @@ interface RunDetails {
 	agentStatus?: AgentStatus;
 	pane?: string;
 	output?: string;
+	error?: string;
+	stopReason?: string;
 	sessionFile?: string;
 	startedAt?: number;
 	finishedAt?: number;
@@ -162,6 +164,32 @@ async function herdrJson(
 		throw new HerdrError(`herdr ${args.join(" ")} failed: ${detail}`);
 	}
 	return envelope.result;
+}
+
+/** Run a herdr CLI command whose success contract is exit 0, with no JSON output required. */
+export async function herdrOk(
+	pi: ExtensionAPI,
+	args: string[],
+	options: { timeout?: number } = {},
+): Promise<void> {
+	const run = await pi.exec("herdr", args, { timeout: options.timeout ?? 15_000 });
+	if (run.code === 0) return;
+
+	for (const raw of [run.stderr.trim(), run.stdout.trim()]) {
+		if (!raw) continue;
+		try {
+			const envelope = JSON.parse(raw) as HerdrEnvelope;
+			if (envelope.error) {
+				throw new HerdrError(envelope.error.message || "herdr command failed", envelope.error.code);
+			}
+		} catch (error) {
+			if (error instanceof HerdrError) throw error;
+			// Preserve non-JSON CLI diagnostics below.
+		}
+	}
+
+	const detail = run.stderr.trim() || run.stdout.trim() || `exit code ${run.code}`;
+	throw new HerdrError(`herdr ${args.slice(0, 3).join(" ")} failed: ${detail}`);
 }
 
 /** `herdr pane read` answers with plain text, not JSON. */
@@ -249,36 +277,47 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
 
 function registerChildReporter(pi: ExtensionAPI, resultPath: string): void {
 	let reported = false;
+	let pendingResult: ChildResult | undefined;
+	let reporting: Promise<void> | undefined;
 
-	const report = async (ctx: ExtensionContext, fallbackError?: string): Promise<void> => {
-		if (reported) return;
-		reported = true;
+	const report = (ctx: ExtensionContext, fallbackError?: string): Promise<void> => {
+		if (reported) return Promise.resolve();
+		if (reporting) return reporting;
 
-		const assistant = findLastAssistant(ctx);
-		const stopReason = typeof assistant?.stopReason === "string" ? assistant.stopReason : undefined;
-		const assistantError = typeof assistant?.errorMessage === "string" ? assistant.errorMessage : undefined;
-		const failed = !assistant || stopReason === "error" || stopReason === "aborted" || Boolean(fallbackError);
-		const result: ChildResult = {
-			version: 1,
-			status: failed ? "failed" : "completed",
-			output: assistant ? textFromAssistant(assistant) : "",
-			error:
-				fallbackError ?? assistantError ?? (!assistant ? "Subagent exited without an assistant response." : undefined),
-			stopReason,
-			sessionFile: ctx.sessionManager.getSessionFile(),
-			provider: typeof assistant?.provider === "string" ? assistant.provider : ctx.model?.provider,
-			model: typeof assistant?.model === "string" ? assistant.model : ctx.model?.id,
-			thinking: pi.getThinkingLevel(),
-			finishedAt: Date.now(),
-		};
-
-		try {
-			await writeJsonAtomic(resultPath, result);
-		} catch (error) {
-			console.error(
-				`[herdr-subagent] Failed to write result: ${error instanceof Error ? error.message : String(error)}`,
-			);
+		if (!pendingResult) {
+			const assistant = findLastAssistant(ctx);
+			const stopReason = typeof assistant?.stopReason === "string" ? assistant.stopReason : undefined;
+			const assistantError = typeof assistant?.errorMessage === "string" ? assistant.errorMessage : undefined;
+			const failed = !assistant || stopReason === "error" || stopReason === "aborted" || Boolean(fallbackError);
+			pendingResult = {
+				version: 1,
+				status: failed ? "failed" : "completed",
+				output: assistant ? textFromAssistant(assistant) : "",
+				error:
+					fallbackError ?? assistantError ?? (!assistant ? "Subagent exited without an assistant response." : undefined),
+				stopReason,
+				sessionFile: ctx.sessionManager.getSessionFile(),
+				provider: typeof assistant?.provider === "string" ? assistant.provider : ctx.model?.provider,
+				model: typeof assistant?.model === "string" ? assistant.model : ctx.model?.id,
+				thinking: pi.getThinkingLevel(),
+				finishedAt: Date.now(),
+			};
 		}
+
+		reporting = writeJsonAtomic(resultPath, pendingResult)
+			.then(() => {
+				reported = true;
+			})
+			.catch((error) => {
+				console.error(
+					`[herdr-subagent] Failed to write result: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			})
+			.finally(() => {
+				reporting = undefined;
+			});
+
+		return reporting;
 	};
 
 	// agent_settled is newer than some peer type declarations but exists in the
@@ -296,7 +335,11 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		if (!reported) await report(ctx, "Subagent session shut down before the task settled.");
+		// A shutdown can race an in-flight report. Re-check after awaiting it so
+		// one transient write failure still gets a final retry during teardown.
+		for (let attempt = 0; attempt < 2 && !reported; attempt++) {
+			await report(ctx, "Subagent session shut down before the task settled.");
+		}
 	});
 }
 
@@ -358,6 +401,43 @@ function detailsFor(spec: RunSpec, status: RunStatus, extra: Partial<RunDetails>
 	};
 }
 
+const RUN_STATUSES = new Set<RunStatus>(["queued", "running", "completed", "failed"]);
+const AGENT_STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "done", "unknown"]);
+const RUN_DETAIL_STRINGS = [
+	"task",
+	"cwd",
+	"workspaceId",
+	"tabId",
+	"paneId",
+	"agentName",
+	"attachCommand",
+	"captureCommand",
+	"killCommand",
+	"provider",
+	"model",
+	"thinking",
+] as const;
+const OPTIONAL_RUN_DETAIL_STRINGS = ["pane", "output", "error", "stopReason", "sessionFile"] as const;
+
+export function isRunDetails(value: unknown): value is RunDetails {
+	if (!value || typeof value !== "object") return false;
+	const details = value as Record<string, unknown>;
+	if (typeof details.status !== "string" || !RUN_STATUSES.has(details.status as RunStatus)) return false;
+	if (RUN_DETAIL_STRINGS.some((key) => typeof details[key] !== "string")) return false;
+	if (OPTIONAL_RUN_DETAIL_STRINGS.some((key) => details[key] !== undefined && typeof details[key] !== "string")) {
+		return false;
+	}
+	if (
+		details.agentStatus !== undefined &&
+		(typeof details.agentStatus !== "string" || !AGENT_STATUSES.has(details.agentStatus as AgentStatus))
+	) {
+		return false;
+	}
+	return [details.startedAt, details.finishedAt].every(
+		(value) => value === undefined || (typeof value === "number" && Number.isFinite(value)),
+	);
+}
+
 function partialText(details: RunDetails): string {
 	const lines = [
 		`Subagent ${details.status} in herdr pane ${details.paneId} (tab ${details.tabId}).`,
@@ -377,16 +457,20 @@ function truncateToolText(text: string): string {
 	return `${truncated.content}\n\n[Output truncated. Full output is available in the child session file.]`;
 }
 
-function resultText(details: RunDetails): string {
+export function resultText(details: RunDetails): string {
 	const duration = formatDuration(details.startedAt, details.finishedAt);
 	const lines = [
 		`Subagent ${details.status}${duration ? ` after ${duration}` : ""}.`,
 		`Model: ${details.provider}/${details.model} (${details.thinking})`,
+	];
+	if (details.stopReason) lines.push(`Stop reason: ${details.stopReason}`);
+	if (details.error) lines.push(`Error: ${details.error}`);
+	lines.push(
 		`herdr: pane ${details.paneId}, tab ${details.tabId}, agent ${details.agentName}`,
 		`Attach: ${details.attachCommand}`,
 		`Capture: ${details.captureCommand}`,
 		`Clean up: ${details.killCommand}`,
-	];
+	);
 	if (details.sessionFile) lines.push(`Child session: ${details.sessionFile}`);
 	if (details.output) lines.push("", details.output);
 	return truncateToolText(lines.join("\n"));
@@ -662,7 +746,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						const initialDetails = detailsFor(spec, "running", { startedAt });
 						onUpdate?.({ content: [{ type: "text", text: partialText(initialDetails) }], details: initialDetails });
 
-						await herdrJson(pi, ["pane", "run", created.paneId, childCommand]);
+						await herdrOk(pi, ["pane", "run", created.paneId, childCommand]);
 
 						let lastPane = "";
 						let lastAgentStatus: AgentStatus | undefined;
@@ -732,14 +816,12 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						const finalPaneText = await herdrPaneRead(pi, created.paneId, PANE_READ_LINES);
 						const finalPane = finalPaneText === undefined ? lastPane : trimPane(finalPaneText);
 						const status: RunStatus = childResult.status === "completed" ? "completed" : "failed";
-						let rawOutput = childResult.output.trim();
-						if (childResult.status === "failed" && childResult.error?.trim()) {
-							rawOutput += `${rawOutput ? "\n\n" : ""}Error: ${childResult.error.trim()}`;
-						}
-						const output = truncateToolText(rawOutput || "(no text output)");
+						const output = truncateToolText(childResult.output.trim() || "(no text output)");
 						const details = detailsFor(spec, status, {
 							pane: finalPane,
 							output,
+							error: childResult.error?.trim() || undefined,
+							stopReason: childResult.stopReason,
 							agentStatus: lastAgentStatus,
 							sessionFile: childResult.sessionFile ?? herdrSessionFile,
 							provider: childResult.provider ?? spec.provider,
@@ -777,7 +859,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		},
 
 		renderResult(result, { expanded, isPartial }, theme) {
-			const details = result.details as RunDetails | undefined;
+			const details = isRunDetails(result.details) ? result.details : undefined;
 			if (!details) {
 				const content = result.content.find((part) => part.type === "text");
 				return new Text(content?.type === "text" ? content.text : "(no output)", 0, 0);
