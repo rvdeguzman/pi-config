@@ -17,9 +17,3 @@ Use `make <target>` for common tasks (test, lint, build, run) when a project has
 
 - Makefile is the default: it's preinstalled everywhere, no new dependency.
 
-## Task tracking
-
-For multi-step work, track steps with the `todo` tool (add/toggle/list/clear) instead of only holding the plan in context. Keep it current as steps complete so `/todos` reflects real state.
-
-For more durable state, keep track with a TODO.md
-

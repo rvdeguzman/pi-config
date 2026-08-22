@@ -42,6 +42,13 @@ import { Type } from "typebox";
 
 const CHILD_ENV = "PI_HERDR_SUBAGENT_CHILD";
 const RESULT_ENV = "PI_HERDR_SUBAGENT_RESULT";
+/**
+ * Set to 1 to make the child pi shut down as soon as it reports its result.
+ * Default (0) leaves the child running in its pane so you can attach and keep
+ * talking to it; the parent tool call still returns as soon as result.json
+ * lands, and `herdr tab close <tab>` is the cleanup.
+ */
+const EXIT_ON_FINISH_ENV = "PI_HERDR_SUBAGENT_EXIT_ON_FINISH";
 const RUNS_DIR = "herdr-subagents";
 const EXIT_SENTINEL = "__pi_herdr_subagent_exit__";
 const POLL_INTERVAL_MS = 500;
@@ -283,7 +290,9 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string): void {
 		) => void
 	)("agent_settled", async (_event, ctx) => {
 		await report(ctx);
-		ctx.shutdown();
+		// Opt-in: by default the child stays alive in its pane after reporting so
+		// the run can be inspected and continued interactively.
+		if (process.env[EXIT_ON_FINISH_ENV] === "1") ctx.shutdown();
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -541,7 +550,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		name: "herdr_subagent",
 		label: "Herdr Subagent",
 		description:
-			"Run one delegated task in a separate pi process inside a background herdr tab. Calls are serialized: only one child works at a time, even if several calls are requested together. The child inherits the current provider, model, and thinking level unless overridden, appears in the herdr sidebar with live working/blocked status, and its tab stays open afterwards so its transcript can be inspected. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
+			"Run one delegated task in a separate pi process inside a background herdr tab. Calls are serialized: only one child works at a time, even if several calls are requested together. The child inherits the current provider, model, and thinking level unless overridden, appears in the herdr sidebar with live working/blocked status, and its tab and pi session stay alive afterwards so its transcript can be inspected and the run continued interactively (close with `herdr tab close <tab>`). Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
 		promptSnippet: "Run one delegated task in an observable herdr pane",
 		promptGuidelines: [
 			"Use herdr_subagent once per delegated task; calls are serialized automatically, so prefer multiple simple calls over asking one child to orchestrate other children.",
@@ -627,11 +636,14 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 					// No `exec`: the pane's shell must outlive pi, otherwise herdr
 					// closes the pane (and its tab) the moment the child exits and the
 					// transcript is gone. The sentinel tells the poll loop that pi
-					// exited even though the pane is still alive.
+					// exited even though the pane is still alive. With the default
+					// (no exit on finish) the child never exits on its own, so the
+					// sentinel only fires on crashes or manual quits.
 					const childCommand = [
 						"env",
 						`${CHILD_ENV}=1`,
 						`${RESULT_ENV}=${shellQuote(resultPath)}`,
+						`${EXIT_ON_FINISH_ENV}=${process.env[EXIT_ON_FINISH_ENV] === "1" ? "1" : "0"}`,
 						piArgs.map(shellQuote).join(" "),
 						`; printf '\\n${EXIT_SENTINEL} %s\\n' "$?"`,
 					].join(" ");
