@@ -31,7 +31,7 @@ const sandbox = mkdtempSync(join(tmpdir(), "quota-test-"));
 mkdirSync(join(sandbox, ".pi/agent"), { recursive: true });
 writeFileSync(
 	join(sandbox, ".pi/agent/auth.json"),
-	JSON.stringify({ anthropic: { access: "test-token", expires: Date.now() + 3_600_000 } }),
+	JSON.stringify({ "openai-codex": { access: "test-token", expires: Date.now() + 3_600_000 } }),
 );
 process.env.HOME = sandbox;
 
@@ -58,8 +58,10 @@ async function harness() {
 		ok: true,
 		status: 200,
 		json: async () => ({
-			five_hour: { utilization: 12, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
-			seven_day: { utilization: 34, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+			rate_limit: {
+				primary_window: { limit_window_seconds: 18_000, used_percent: 12, reset_after_seconds: 3_600 },
+				secondary_window: { limit_window_seconds: 604_800, used_percent: 34, reset_after_seconds: 86_400 },
+			},
 		}),
 	})) as unknown as typeof globalThis.fetch;
 
@@ -84,7 +86,7 @@ async function harness() {
 		},
 		get model() {
 			assertActive();
-			return { provider: "anthropic" };
+			return { provider: "openai-codex" };
 		},
 	};
 

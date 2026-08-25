@@ -1,6 +1,6 @@
 /**
- * Provider quota status — pings Claude and Codex usage endpoints (same ones
- * notch-usage uses) and shows e.g. "5h 8% wk 19%" in the footer.
+ * Provider quota status — pings Codex and Kimi usage endpoints and shows
+ * e.g. "5h 8% wk 19%" in the footer.
  * Reads OAuth tokens pi already stores in ~/.pi/agent/auth.json.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -12,7 +12,7 @@ const REFRESH_MS = 5 * 60 * 1000;
 // File cache shared across pi instances so N open sessions don't each ping.
 const CACHE_PATH = join(homedir(), ".pi/agent/quota-cache.json");
 const CACHE_VERSION = 2;
-const TTL: Record<string, number> = { cc: 15 * 60 * 1000, cx: 5 * 60 * 1000, k3: 5 * 60 * 1000 };
+const TTL: Record<string, number> = { cx: 5 * 60 * 1000, k3: 5 * 60 * 1000 };
 
 export type Win = { label: string; pct: number; resetAt?: number };
 /**
@@ -98,31 +98,6 @@ async function getJson(url: string, headers: Record<string, string>): Promise<an
 	});
 	if (res.status === 429) throw new Error("429");
 	return res.ok ? res.json() : undefined;
-}
-
-async function claudeWindows(): Promise<Win[]> {
-	const a = auth("anthropic");
-	if (!a) return [];
-	const u = await getJson("https://api.anthropic.com/api/oauth/usage", {
-		Authorization: `Bearer ${a.access}`,
-		"anthropic-beta": "oauth-2025-04-20",
-		"User-Agent": "claude-code/2.1.0",
-	});
-	if (!u) return [];
-	const wins: Win[] = [];
-	if (u.five_hour)
-		wins.push({
-			label: "5h",
-			pct: u.five_hour.utilization ?? 0,
-			resetAt: u.five_hour.resets_at ? Date.parse(u.five_hour.resets_at) : undefined,
-		});
-	if (u.seven_day)
-		wins.push({
-			label: "wk",
-			pct: u.seven_day.utilization ?? 0,
-			resetAt: u.seven_day.resets_at ? Date.parse(u.seven_day.resets_at) : undefined,
-		});
-	return wins;
 }
 
 async function kimiWindows(): Promise<Win[]> {
@@ -245,13 +220,11 @@ export default function (pi: ExtensionAPI) {
 		if (!withLiveCtx(() => void (provider = ctx.model?.provider))) return;
 		lastFetch = Date.now();
 		const source =
-			provider === "anthropic"
-				? () => cached("cc", claudeWindows, reload)
-				: provider === "openai-codex"
-					? () => cached("cx", codexWindows, reload)
-					: provider === "kimi-coding"
-						? () => cached("k3", kimiWindows, reload)
-						: undefined;
+			provider === "openai-codex"
+				? () => cached("cx", codexWindows, reload)
+				: provider === "kimi-coding"
+					? () => cached("k3", kimiWindows, reload)
+					: undefined;
 		if (!source) {
 			lastWins = [];
 			withLiveCtx(() => {
