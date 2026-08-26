@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
-import herdrSubagentExtension, { herdrOk, isRunDetails, resultText } from "../herdr-subagent.ts";
+import herdrSubagentExtension, {
+	herdrOk,
+	isRunDetails,
+	parseChildExitCode,
+	resultText,
+} from "../herdr-subagent.ts";
 
 function execPi(result: { code: number; stdout?: string; stderr?: string }) {
 	return {
@@ -19,6 +24,15 @@ function execPi(result: { code: number; stdout?: string; stderr?: string }) {
 
 test("herdrOk accepts exit 0 with empty stdout", async () => {
 	await herdrOk(execPi({ code: 0 }), ["pane", "run", "w1:p1", "printf ok"]);
+});
+
+test("exit sentinel parser ignores echoed commands and parses standalone lines", () => {
+	const sentinel = "__pi_herdr_subagent_exit__abc123";
+	const echoed = `rv@host $ env FOO=1 pi '@task.md' ; printf '\\n${sentinel} %s\\n' "$?"`;
+	assert.equal(parseChildExitCode(echoed, sentinel), undefined);
+	assert.equal(parseChildExitCode(`${echoed}\nworking...\n${sentinel} 17\n`, sentinel), 17);
+	assert.equal(parseChildExitCode(`${sentinel} nope\n`, sentinel), undefined);
+	assert.equal(parseChildExitCode(`prefix ${sentinel} 0\n`, sentinel), undefined);
 });
 
 test("herdrOk preserves structured and plain nonzero errors", async () => {
@@ -98,6 +112,90 @@ test("aborted child results expose both error and stop reason", () => {
 	} as any);
 	assert.match(text, /Stop reason: aborted/);
 	assert.match(text, /Error: Operation aborted/);
+});
+
+test("a result arriving during exit grace wins over the exit sentinel", async () => {
+	let tool: any;
+	let childCommand = "";
+	let resultPath = "";
+	let sentinel = "";
+	const sessionId = `grace-race-${Date.now()}`;
+	const previousWorkspace = process.env.HERDR_WORKSPACE_ID;
+	delete process.env.HERDR_WORKSPACE_ID;
+
+	const pi = {
+		on: () => undefined,
+		registerTool: (definition: any) => {
+			tool = definition;
+		},
+		getThinkingLevel: () => "high",
+		exec: async (_command: string, args: string[]) => {
+			if (args[0] === "--version") return { code: 0, stdout: "herdr test", stderr: "", killed: false };
+			if (args[0] === "workspace" && args[1] === "create") {
+				return {
+					code: 0,
+					stdout: JSON.stringify({
+						result: {
+							workspace: { workspace_id: "w1" },
+							tab: { tab_id: "w1:t1" },
+							root_pane: { pane_id: "w1:p1" },
+						},
+					}),
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (args[0] === "pane" && args[1] === "run") {
+				childCommand = args[3] ?? "";
+				assert.doesNotMatch(childCommand, /--session-id/);
+				resultPath = childCommand.match(/PI_HERDR_SUBAGENT_RESULT='([^']+)'/)?.[1] ?? "";
+				sentinel = childCommand.match(/(__pi_herdr_subagent_exit__[a-f0-9]+) %s/)?.[1] ?? "";
+				assert.ok(resultPath);
+				assert.ok(sentinel);
+				setTimeout(async () => {
+					await writeFile(
+						resultPath,
+						JSON.stringify({
+							version: 1,
+							status: "completed",
+							output: "late but valid",
+							finishedAt: Date.now(),
+						}),
+					);
+				}, 700);
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
+			if (args[0] === "pane" && args[1] === "read") {
+				return { code: 0, stdout: `${sentinel} 0\n`, stderr: "", killed: false };
+			}
+			if (args[0] === "agent" && args[1] === "get") {
+				return { code: 1, stdout: "", stderr: "no agent", killed: false };
+			}
+			throw new Error(`unexpected herdr args: ${args.join(" ")}`);
+		},
+	} as any;
+
+	try {
+		herdrSubagentExtension(pi);
+		const result = await tool.execute(
+			"call-1",
+			{ task: "wait for a late result" },
+			undefined,
+			undefined,
+			{
+				cwd: process.cwd(),
+				model: { provider: "openai-codex", id: "gpt-test" },
+				isProjectTrusted: () => true,
+				sessionManager: { getSessionId: () => sessionId },
+			},
+		);
+		assert.match(result.content[0].text, /late but valid/);
+		assert.ok(childCommand);
+	} finally {
+		if (previousWorkspace === undefined) delete process.env.HERDR_WORKSPACE_ID;
+		else process.env.HERDR_WORKSPACE_ID = previousWorkspace;
+		if (resultPath) await rm(dirname(resultPath), { recursive: true, force: true });
+	}
 });
 
 test("a shutdown retry preserves an already-settled successful result", async () => {

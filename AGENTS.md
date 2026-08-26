@@ -11,6 +11,10 @@ When cloning repositories for reference or investigation, place them in a `.repo
 - Do not build or run exploratory repositories unless explicitly requested.
 - Follow project-specific instructions when they define another location.
 
+## Browser automation
+
+Prefer controlling the user's existing Brave Browser windows with `find_roots`, `observe_ui`, and `act_ui`. Do not use `launch_browser` unless the user specifically requests a separate managed browser instance.
+
 ## Running things
 
 Use `make <target>` for common tasks (test, lint, build, run) when a project has or needs one. Add a Makefile target instead of documenting ad-hoc shell one-liners.

@@ -50,7 +50,7 @@ const RESULT_ENV = "PI_HERDR_SUBAGENT_RESULT";
  */
 const EXIT_ON_FINISH_ENV = "PI_HERDR_SUBAGENT_EXIT_ON_FINISH";
 const RUNS_DIR = "herdr-subagents";
-const EXIT_SENTINEL = "__pi_herdr_subagent_exit__";
+const EXIT_SENTINEL_PREFIX = "__pi_herdr_subagent_exit__";
 const POLL_INTERVAL_MS = 500;
 /** Poll herdr's agent lifecycle state every N pane polls (it changes slowly). */
 const AGENT_STATUS_EVERY = 4;
@@ -120,6 +120,21 @@ interface RunSpec {
 function shellQuote(value: string): string {
 	if (value.length === 0) return "''";
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function exitSentinelFor(runId: string): string {
+	return `${EXIT_SENTINEL_PREFIX}${runId.replace(/-/g, "")}`;
+}
+
+/** Return the exit code only when the pane contains a complete sentinel line. */
+export function parseChildExitCode(output: string, sentinel: string): number | undefined {
+	const prefix = `${sentinel} `;
+	for (const line of output.replace(/\r/g, "").split("\n")) {
+		if (!line.startsWith(prefix)) continue;
+		const code = line.slice(prefix.length);
+		if (/^\d+$/.test(code)) return Number(code);
+	}
+	return undefined;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -660,6 +675,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			const selectedModel = resolveModel(ctx, params.provider, params.model);
 			const thinking = params.thinking ?? pi.getThinkingLevel();
 			const childSessionId = randomUUID();
+			const exitSentinel = exitSentinelFor(childSessionId);
 			const runDir = path.join(getAgentDir(), RUNS_DIR, ctx.sessionManager.getSessionId(), childSessionId);
 			const resultPath = path.join(runDir, "result.json");
 			const spec: RunSpec = {
@@ -708,8 +724,6 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						thinking,
 						"--session-dir",
 						sessionDir,
-						"--session-id",
-						childSessionId,
 						"--name",
 						spec.agentName,
 						spec.trusted ? "--approve" : "--no-approve",
@@ -729,7 +743,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						`${RESULT_ENV}=${shellQuote(resultPath)}`,
 						`${EXIT_ON_FINISH_ENV}=${process.env[EXIT_ON_FINISH_ENV] === "1" ? "1" : "0"}`,
 						piArgs.map(shellQuote).join(" "),
-						`; printf '\\n${EXIT_SENTINEL} %s\\n' "$?"`,
+						`; printf '\\n${exitSentinel} %s\\n' "$?"`,
 					].join(" ");
 
 					const startedAt = Date.now();
@@ -793,9 +807,9 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 							}
 
 							// pi exited without writing a result, or the pane died outright.
-							const sawExit = paneText?.includes(EXIT_SENTINEL) ?? false;
+							const exitCode = paneText === undefined ? undefined : parseChildExitCode(paneText, exitSentinel);
 							const paneGone = paneText === undefined && !(await paneExists(pi, created.paneId));
-							if (sawExit || paneGone) {
+							if (exitCode !== undefined || paneGone) {
 								exitSeenAt ??= Date.now();
 								if (Date.now() - exitSeenAt >= EXIT_GRACE_MS) {
 									try {
