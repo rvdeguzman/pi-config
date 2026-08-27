@@ -4,12 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import herdrSubagentExtension, {
-	herdrOk,
-	isRunDetails,
-	parseChildExitCode,
-	resultText,
-} from "../herdr-subagent.ts";
+import herdrSubagentExtension, { herdrOk, isRunDetails, parseChildExitCode, resultText } from "../herdr-subagent.ts";
 
 function execPi(result: { code: number; stdout?: string; stderr?: string }) {
 	return {
@@ -40,7 +35,9 @@ test("herdrOk preserves structured and plain nonzero errors", async () => {
 		herdrOk(
 			execPi({
 				code: 1,
-				stderr: JSON.stringify({ error: { code: "pane_not_found", message: "pane is gone" } }),
+				stderr: JSON.stringify({
+					error: { code: "pane_not_found", message: "pane is gone" },
+				}),
 			}),
 			["pane", "run", "w1:p1", "printf ok"],
 		),
@@ -48,11 +45,7 @@ test("herdrOk preserves structured and plain nonzero errors", async () => {
 	);
 
 	await assert.rejects(
-		herdrOk(execPi({ code: 2, stderr: "usage: herdr pane run <pane_id> <command>" }), [
-			"pane",
-			"run",
-			"w1:p1",
-		]),
+		herdrOk(execPi({ code: 2, stderr: "usage: herdr pane run <pane_id> <command>" }), ["pane", "run", "w1:p1"]),
 		/usage: herdr pane run/,
 	);
 });
@@ -129,6 +122,8 @@ test("a result arriving during exit grace wins over the exit sentinel", async ()
 			tool = definition;
 		},
 		getThinkingLevel: () => "high",
+		getAllTools: () => ["read", "grep", "find", "ls"].map((name) => ({ name })),
+		getActiveTools: () => ["read", "grep", "find", "ls"],
 		exec: async (_command: string, args: string[]) => {
 			if (args[0] === "--version") return { code: 0, stdout: "herdr test", stderr: "", killed: false };
 			if (args[0] === "workspace" && args[1] === "create") {
@@ -166,7 +161,12 @@ test("a result arriving during exit grace wins over the exit sentinel", async ()
 				return { code: 0, stdout: "", stderr: "", killed: false };
 			}
 			if (args[0] === "pane" && args[1] === "read") {
-				return { code: 0, stdout: `${sentinel} 0\n`, stderr: "", killed: false };
+				return {
+					code: 0,
+					stdout: `${sentinel} 0\n`,
+					stderr: "",
+					killed: false,
+				};
 			}
 			if (args[0] === "agent" && args[1] === "get") {
 				return { code: 1, stdout: "", stderr: "no agent", killed: false };
@@ -179,7 +179,7 @@ test("a result arriving during exit grace wins over the exit sentinel", async ()
 		herdrSubagentExtension(pi);
 		const result = await tool.execute(
 			"call-1",
-			{ task: "wait for a late result" },
+			{ agent: "scout", task: "wait for a late result" },
 			undefined,
 			undefined,
 			{
@@ -195,6 +195,79 @@ test("a result arriving during exit grace wins over the exit sentinel", async ()
 		if (previousWorkspace === undefined) delete process.env.HERDR_WORKSPACE_ID;
 		else process.env.HERDR_WORKSPACE_ID = previousWorkspace;
 		if (resultPath) await rm(dirname(resultPath), { recursive: true, force: true });
+	}
+});
+
+test("sibling subagent calls run concurrently", async () => {
+	let tool: any;
+	let paneSequence = 0;
+	let activeRuns = 0;
+	let maximumActiveRuns = 0;
+	const resultDirectories: string[] = [];
+	const pi = {
+		on: () => undefined,
+		registerTool: (definition: any) => {
+			tool = definition;
+		},
+		getThinkingLevel: () => "low",
+		getAllTools: () => ["read", "grep", "find", "ls"].map((name) => ({ name })),
+		getActiveTools: () => ["read"],
+		exec: async (_command: string, args: string[]) => {
+			if (args[0] === "--version") return { code: 0, stdout: "herdr test", stderr: "", killed: false };
+			if ((args[0] === "workspace" || args[0] === "tab") && args[1] === "create") {
+				const id = ++paneSequence;
+				return {
+					code: 0,
+					stdout: JSON.stringify({
+						result: {
+							workspace: { workspace_id: `w${id}` },
+							tab: { tab_id: `w${id}:t1` },
+							root_pane: { pane_id: `w${id}:p1` },
+						},
+					}),
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (args[0] === "pane" && args[1] === "run") {
+				const resultPath = (args[3] ?? "").match(/PI_HERDR_SUBAGENT_RESULT='([^']+)'/)?.[1] ?? "";
+				resultDirectories.push(dirname(resultPath));
+				activeRuns++;
+				maximumActiveRuns = Math.max(maximumActiveRuns, activeRuns);
+				setTimeout(async () => {
+					await writeFile(
+						resultPath,
+						JSON.stringify({
+							version: 1,
+							status: "completed",
+							output: "done",
+							finishedAt: Date.now(),
+						}),
+					);
+					activeRuns--;
+				}, 100);
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
+			if (args[0] === "pane" && args[1] === "read") return { code: 0, stdout: "", stderr: "", killed: false };
+			if (args[0] === "agent" && args[1] === "get") return { code: 1, stdout: "", stderr: "", killed: false };
+			throw new Error(`unexpected herdr args: ${args.join(" ")}`);
+		},
+	} as any;
+	herdrSubagentExtension(pi);
+	const ctx = {
+		cwd: process.cwd(),
+		model: { provider: "openai-codex", id: "gpt-test" },
+		isProjectTrusted: () => true,
+		sessionManager: { getSessionId: () => `concurrent-${Date.now()}` },
+	} as any;
+	try {
+		await Promise.all([
+			tool.execute("one", { agent: "scout", task: "first" }, undefined, undefined, ctx),
+			tool.execute("two", { agent: "scout", task: "second" }, undefined, undefined, ctx),
+		]);
+		assert.equal(maximumActiveRuns, 2);
+	} finally {
+		await Promise.all(resultDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
 	}
 });
 
