@@ -156,16 +156,22 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		return `Implement the agreed plan.\n\nRemaining steps:\n${remainingList}${planDetails}\n\nExecute the steps in order. After completing a step, include a [DONE:n] tag in your response.`;
 	}
 
+	function leavePlanModeForImplementation(ctx: ExtensionContext): void {
+		planModeEnabled = false;
+		if (toolsBeforePlanMode !== undefined) {
+			restoreNormalModeTools();
+		}
+		updateStatus(ctx);
+		persistState();
+	}
+
 	function implementHere(ctx: ExtensionContext): boolean {
 		if (todoItems.length === 0) {
 			ctx.ui.notify("No numbered plan was captured. Enter /plan and create one first.", "warning");
 			return false;
 		}
-		planModeEnabled = false;
 		executionMode = true;
-		restoreNormalModeTools();
-		updateStatus(ctx);
-		persistState();
+		leavePlanModeForImplementation(ctx);
 		pi.sendMessage(
 			{ customType: "plan-mode-execute", content: buildImplementationPrompt(), display: true },
 			{ triggerTurn: true },
@@ -180,6 +186,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("No numbered plan was captured. Enter /plan and create one first.", "warning");
 				return;
 			}
+
+			leavePlanModeForImplementation(ctx);
 
 			// Capture plain data before replacing the session; old session objects become stale.
 			const handoffTodos = todoItems.map((item) => ({ ...item }));
@@ -226,6 +234,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("No numbered plan was captured. Enter /plan and create one first.", "warning");
 				return;
 			}
+			leavePlanModeForImplementation(ctx);
 			ctx.ui.notify("Compacting planning context before implementation…", "info");
 			await new Promise<void>((resolve) => {
 				ctx.compact({
@@ -405,12 +414,15 @@ After completing a step, include a [DONE:n] tag in your response.`,
 		]);
 
 		if (choice?.startsWith("Implement in a fresh")) {
+			leavePlanModeForImplementation(ctx);
 			pi.sendMessage(planTodoListMessage, { deliverAs: "followUp" });
 			pi.sendUserMessage("/implement", { deliverAs: "followUp", expandPromptTemplates: true });
 		} else if (choice?.startsWith("Compact")) {
+			leavePlanModeForImplementation(ctx);
 			pi.sendMessage(planTodoListMessage, { deliverAs: "followUp" });
 			pi.sendUserMessage("/implement-compact", { deliverAs: "followUp", expandPromptTemplates: true });
 		} else if (choice?.startsWith("Implement here")) {
+			leavePlanModeForImplementation(ctx);
 			pi.sendMessage(planTodoListMessage, { deliverAs: "followUp" });
 			pi.sendUserMessage("/implement-here", { deliverAs: "followUp", expandPromptTemplates: true });
 		} else if (choice === "Refine the plan") {

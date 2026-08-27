@@ -1,6 +1,6 @@
-.PHONY: test test-herdr-subagent
+.PHONY: test test-extensions
 
-test: test-herdr-subagent
+test: test-extensions
 
-test-herdr-subagent:
-	cd ../.. && node --experimental-transform-types --test extensions/tests/herdr-subagent.test.ts extensions/tests/subagent-profiles.test.ts extensions/tests/agent-ref-autocomplete.test.ts
+test-extensions:
+	cd ../.. && node --experimental-transform-types --test extensions/tests/herdr-subagent.test.ts extensions/tests/subagent-profiles.test.ts extensions/tests/agent-ref-autocomplete.test.ts extensions/tests/plan-mode.test.ts
