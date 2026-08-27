@@ -16,7 +16,13 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { extractTodoItems, markCompletedSteps, type TodoItem } from "./utils.ts";
+import {
+	extractTodoItems,
+	formatStepSelection,
+	markCompletedSteps,
+	parseStepSelection,
+	type TodoItem,
+} from "./utils.ts";
 
 // Tools
 const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "ask_user_question"];
@@ -29,6 +35,7 @@ interface PlanModeState {
 	enabled: boolean;
 	todos?: TodoItem[];
 	executing?: boolean;
+	executionSteps?: number[];
 	planText?: string;
 	toolsBeforePlanMode?: string[];
 }
@@ -49,6 +56,7 @@ function getTextContent(message: AssistantMessage): string {
 export default function planModeExtension(pi: ExtensionAPI): void {
 	let planModeEnabled = false;
 	let executionMode = false;
+	let executionSteps: number[] = [];
 	let todoItems: TodoItem[] = [];
 	let planText = "";
 	let toolsBeforePlanMode: string[] | undefined;
@@ -121,14 +129,27 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			enabled: planModeEnabled,
 			todos: todoItems,
 			executing: executionMode,
+			executionSteps,
 			planText,
 			toolsBeforePlanMode,
 		});
 	}
 
 	function togglePlanMode(ctx: ExtensionContext): void {
+		if (executionMode && todoItems.length > 0) {
+			executionMode = false;
+			executionSteps = [];
+			planModeEnabled = true;
+			enablePlanModeTools();
+			ctx.ui.notify("Implementation paused. Plan progress preserved; implementation tools disabled.");
+			updateStatus(ctx);
+			persistState();
+			return;
+		}
+
 		planModeEnabled = !planModeEnabled;
 		executionMode = false;
+		executionSteps = [];
 		todoItems = [];
 		planText = "";
 
@@ -148,12 +169,58 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => togglePlanMode(ctx),
 	});
 
-	function buildImplementationPrompt(items = todoItems, capturedPlan = planText): string {
-		const remainingList = items.filter((t) => !t.completed).map((t) => `${t.step}. ${t.text}`).join("\n");
+	function incompleteSteps(items = todoItems): number[] {
+		return items.filter((item) => !item.completed).map((item) => item.step);
+	}
+
+	function selectedIncompleteItems(items = todoItems, steps = executionSteps): TodoItem[] {
+		const selected = new Set(steps);
+		return items.filter((item) => !item.completed && selected.has(item.step));
+	}
+
+	function buildImplementationPrompt(
+		items = todoItems,
+		capturedPlan = planText,
+		steps = executionSteps.length > 0 ? executionSteps : incompleteSteps(items),
+	): string {
+		const remainingList = selectedIncompleteItems(items, steps).map((item) => `${item.step}. ${item.text}`).join("\n");
 		const planDetails = capturedPlan.trim()
 			? `\n\nCaptured planning response:\n${capturedPlan.trim()}`
 			: "";
-		return `Implement the agreed plan.\n\nRemaining steps:\n${remainingList}${planDetails}\n\nExecute the steps in order. After completing a step, include a [DONE:n] tag in your response.`;
+		return `Implement the selected milestone from the agreed plan.\n\nSelected steps:\n${remainingList}${planDetails}\n\nExecute only the selected steps, in order. After completing a step, include a [DONE:n] tag in your response. Do not begin unselected steps.`;
+	}
+
+	async function chooseImplementationSteps(ctx: ExtensionContext, selector: string): Promise<number[] | undefined> {
+		if (todoItems.length === 0) {
+			ctx.ui.notify("No numbered plan was captured. Enter /plan and create one first.", "warning");
+			return undefined;
+		}
+
+		if (selector.trim()) {
+			const parsed = parseStepSelection(selector, todoItems);
+			if (parsed.error) {
+				ctx.ui.notify(parsed.error, "warning");
+				return undefined;
+			}
+			return parsed.steps;
+		}
+
+		if (!ctx.hasUI) return incompleteSteps();
+		while (true) {
+			const remaining = incompleteSteps();
+			const choice = await ctx.ui.select(
+				`Choose implementation scope · incomplete: ${formatStepSelection(remaining)}`,
+				["Enter a step range…", `All remaining (${remaining.length} steps)`],
+			);
+			if (!choice) return undefined;
+			if (choice.startsWith("All remaining")) return remaining;
+
+			const input = await ctx.ui.input("Steps to implement:", "e.g. 1-3,5");
+			if (input === undefined) return undefined;
+			const parsed = parseStepSelection(input, todoItems);
+			if (!parsed.error) return parsed.steps;
+			ctx.ui.notify(parsed.error, "warning");
+		}
 	}
 
 	function leavePlanModeForImplementation(ctx: ExtensionContext): void {
@@ -165,12 +232,22 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		persistState();
 	}
 
-	function implementHere(ctx: ExtensionContext): boolean {
-		if (todoItems.length === 0) {
-			ctx.ui.notify("No numbered plan was captured. Enter /plan and create one first.", "warning");
+	function returnToPlanMode(ctx: ExtensionContext): void {
+		executionMode = false;
+		executionSteps = [];
+		planModeEnabled = true;
+		enablePlanModeTools();
+		updateStatus(ctx);
+		persistState();
+	}
+
+	function implementHere(ctx: ExtensionContext, steps: number[]): boolean {
+		if (todoItems.length === 0 || steps.length === 0) {
+			ctx.ui.notify("No incomplete plan steps were selected.", "warning");
 			return false;
 		}
 		executionMode = true;
+		executionSteps = [...steps];
 		leavePlanModeForImplementation(ctx);
 		pi.sendMessage(
 			{ customType: "plan-mode-execute", content: buildImplementationPrompt(), display: true },
@@ -180,21 +257,25 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("implement", {
-		description: "Implement the captured plan in a fresh linked session",
-		handler: async (_args, ctx) => {
-			if (todoItems.length === 0) {
-				ctx.ui.notify("No numbered plan was captured. Enter /plan and create one first.", "warning");
+		description: "Select plan steps and implement them in a fresh linked session",
+		handler: async (args, ctx) => {
+			if (executionMode) {
+				ctx.ui.notify("A plan milestone is already being implemented.", "info");
 				return;
 			}
+			const selectedSteps = await chooseImplementationSteps(ctx, args);
+			if (!selectedSteps) return;
 
 			leavePlanModeForImplementation(ctx);
 
 			// Capture plain data before replacing the session; old session objects become stale.
 			const handoffTodos = todoItems.map((item) => ({ ...item }));
+			const handoffSteps = [...selectedSteps];
 			const handoffPlan = planText;
-			const handoffPrompt = buildImplementationPrompt(handoffTodos, handoffPlan);
+			const handoffPrompt = buildImplementationPrompt(handoffTodos, handoffPlan, handoffSteps);
 			const parentSession = ctx.sessionManager.getSessionFile();
 			const sourceName = pi.getSessionName();
+			const stepLabel = formatStepSelection(handoffSteps);
 
 			const result = await ctx.newSession({
 				parentSession,
@@ -203,47 +284,57 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 						enabled: false,
 						todos: handoffTodos,
 						executing: true,
+						executionSteps: handoffSteps,
 						planText: handoffPlan,
 					} satisfies PlanModeState);
-					sessionManager.appendSessionInfo(sourceName ? `${sourceName} — implementation` : "Plan implementation");
+					const baseName = sourceName ?? "Plan implementation";
+					sessionManager.appendSessionInfo(`${baseName} — steps ${stepLabel}`);
 				},
 				withSession: async (freshCtx) => {
 					await freshCtx.sendUserMessage(handoffPrompt);
 				},
 			});
 
-			if (result.cancelled) ctx.ui.notify("Fresh implementation session was cancelled.", "warning");
+			if (result.cancelled) {
+				returnToPlanMode(ctx);
+				ctx.ui.notify("Fresh implementation session was cancelled.", "warning");
+			}
 		},
 	});
 
 	pi.registerCommand("implement-here", {
-		description: "Implement the captured plan in the current full context",
-		handler: async (_args, ctx) => {
+		description: "Select plan steps and implement them in the current full context",
+		handler: async (args, ctx) => {
 			if (executionMode) {
-				ctx.ui.notify("The plan is already being implemented.", "info");
+				ctx.ui.notify("A plan milestone is already being implemented.", "info");
 				return;
 			}
-			implementHere(ctx);
+			const selectedSteps = await chooseImplementationSteps(ctx, args);
+			if (selectedSteps) implementHere(ctx, selectedSteps);
 		},
 	});
 
 	pi.registerCommand("implement-compact", {
-		description: "Compact the current context, then implement the captured plan",
-		handler: async (_args, ctx) => {
-			if (todoItems.length === 0) {
-				ctx.ui.notify("No numbered plan was captured. Enter /plan and create one first.", "warning");
+		description: "Compact context, then implement selected plan steps here",
+		handler: async (args, ctx) => {
+			if (executionMode) {
+				ctx.ui.notify("A plan milestone is already being implemented.", "info");
 				return;
 			}
+			const selectedSteps = await chooseImplementationSteps(ctx, args);
+			if (!selectedSteps) return;
+
 			leavePlanModeForImplementation(ctx);
 			ctx.ui.notify("Compacting planning context before implementation…", "info");
 			await new Promise<void>((resolve) => {
 				ctx.compact({
 					customInstructions: "Preserve the agreed implementation plan, requirements, decisions, constraints, relevant file paths, and verification steps.",
 					onComplete: () => {
-						implementHere(ctx);
+						implementHere(ctx, selectedSteps);
 						resolve();
 					},
 					onError: (error) => {
+						returnToPlanMode(ctx);
 						ctx.ui.notify(`Compaction failed: ${error.message}`, "error");
 						resolve();
 					},
@@ -259,7 +350,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("No captured plan. Enter /plan and ask for a numbered plan first.", "info");
 				return;
 			}
-			const list = todoItems.map((item, i) => `${i + 1}. ${item.completed ? "✓" : "○"} ${item.text}`).join("\n");
+			const list = todoItems.map((item) => `${item.step}. ${item.completed ? "✓" : "○"} ${item.text}`).join("\n");
 			ctx.ui.notify(`Plan Progress:\n${list}`, "info");
 		},
 	});
@@ -332,7 +423,7 @@ Do NOT attempt to make changes - just describe what you would do.`,
 		}
 
 		if (executionMode && todoItems.length > 0) {
-			const remaining = todoItems.filter((t) => !t.completed);
+			const remaining = selectedIncompleteItems();
 			const todoList = remaining.map((t) => `${t.step}. ${t.text}`).join("\n");
 			return {
 				message: {
@@ -356,7 +447,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
 		if (!isAssistantMessage(event.message)) return;
 
 		const text = getTextContent(event.message);
-		if (markCompletedSteps(text, todoItems) > 0) {
+		if (markCompletedSteps(text, todoItems, executionSteps) > 0) {
 			updateStatus(ctx);
 		}
 		persistState();
@@ -364,19 +455,35 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
 	// Handle plan completion and plan mode UI
 	pi.on("agent_end", async (event, ctx) => {
-		// Check if execution is complete
+		// Check if the selected milestone is complete.
 		if (executionMode && todoItems.length > 0) {
-			if (todoItems.every((t) => t.completed)) {
-				const completedList = todoItems.map((t) => `~~${t.text}~~`).join("\n");
-				pi.sendMessage(
-					{ customType: "plan-complete", content: `**Plan Complete!** ✓\n\n${completedList}`, display: true },
-					{ triggerTurn: false },
-				);
-				executionMode = false;
-				todoItems = [];
-				planText = "";
-				updateStatus(ctx);
-				persistState(); // Save cleared state so resume doesn't restore old execution mode
+			const selected = new Set(executionSteps);
+			const milestoneItems = todoItems.filter((item) => selected.has(item.step));
+			if (milestoneItems.length > 0 && milestoneItems.every((item) => item.completed)) {
+				const completedList = milestoneItems.map((item) => `~~${item.step}. ${item.text}~~`).join("\n");
+				const remaining = incompleteSteps();
+				if (remaining.length === 0) {
+					pi.sendMessage(
+						{ customType: "plan-complete", content: `**Plan Complete!** ✓\n\n${completedList}`, display: true },
+						{ triggerTurn: false },
+					);
+					executionMode = false;
+					executionSteps = [];
+					todoItems = [];
+					planText = "";
+					updateStatus(ctx);
+					persistState();
+				} else {
+					pi.sendMessage(
+						{
+							customType: "plan-milestone-complete",
+							content: `**Milestone Complete!** ✓\n\n${completedList}\n\nRemaining steps: ${formatStepSelection(remaining)}\nRun /implement to choose the next milestone.`,
+							display: true,
+						},
+						{ triggerTurn: false },
+					);
+					returnToPlanMode(ctx);
+				}
 			}
 			return;
 		}
@@ -398,7 +505,9 @@ After completing a step, include a [DONE:n] tag in your response.`,
 		persistState();
 
 		// Show plan steps and prompt for next action
-		const todoListText = todoItems.map((t, i) => `${i + 1}. ☐ ${t.text}`).join("\n");
+		const todoListText = todoItems
+			.map((item) => `${item.step}. ${item.completed ? "☑" : "☐"} ${item.text}`)
+			.join("\n");
 		const planTodoListMessage = {
 			customType: "plan-todo-list",
 			content: `**Plan Steps (${todoItems.length}):**\n\n${todoListText}`,
@@ -413,18 +522,23 @@ After completing a step, include a [DONE:n] tag in your response.`,
 			"Refine the plan",
 		]);
 
-		if (choice?.startsWith("Implement in a fresh")) {
+		if (
+			choice?.startsWith("Implement in a fresh") ||
+			choice?.startsWith("Compact") ||
+			choice?.startsWith("Implement here")
+		) {
+			const selectedSteps = await chooseImplementationSteps(ctx, "");
+			if (!selectedSteps) return;
+
+			const selector = formatStepSelection(selectedSteps);
+			const command = choice.startsWith("Implement in a fresh")
+				? "implement"
+				: choice.startsWith("Compact")
+					? "implement-compact"
+					: "implement-here";
 			leavePlanModeForImplementation(ctx);
 			pi.sendMessage(planTodoListMessage, { deliverAs: "followUp" });
-			pi.sendUserMessage("/implement", { deliverAs: "followUp", expandPromptTemplates: true });
-		} else if (choice?.startsWith("Compact")) {
-			leavePlanModeForImplementation(ctx);
-			pi.sendMessage(planTodoListMessage, { deliverAs: "followUp" });
-			pi.sendUserMessage("/implement-compact", { deliverAs: "followUp", expandPromptTemplates: true });
-		} else if (choice?.startsWith("Implement here")) {
-			leavePlanModeForImplementation(ctx);
-			pi.sendMessage(planTodoListMessage, { deliverAs: "followUp" });
-			pi.sendUserMessage("/implement-here", { deliverAs: "followUp", expandPromptTemplates: true });
+			pi.sendUserMessage(`/${command} ${selector}`, { deliverAs: "followUp", expandPromptTemplates: true });
 		} else if (choice === "Refine the plan") {
 			const refinement = await ctx.ui.editor("Refine the plan:", "");
 			if (refinement?.trim()) {
@@ -451,9 +565,12 @@ After completing a step, include a [DONE:n] tag in your response.`,
 			planModeEnabled = planModeEntry.data.enabled ?? planModeEnabled;
 			todoItems = planModeEntry.data.todos ?? todoItems;
 			executionMode = planModeEntry.data.executing ?? executionMode;
+			executionSteps = planModeEntry.data.executionSteps ?? executionSteps;
 			planText = planModeEntry.data.planText ?? planText;
 			toolsBeforePlanMode = planModeEntry.data.toolsBeforePlanMode ?? toolsBeforePlanMode;
 		}
+		// Older sessions predate ranged milestones and implicitly execute every incomplete step.
+		if (executionMode && executionSteps.length === 0) executionSteps = incompleteSteps();
 
 		// On resume: re-scan messages to rebuild completion state
 		// Only scan messages AFTER the last "plan-mode-execute" to avoid picking up [DONE:n] from previous plans
@@ -478,7 +595,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
 				}
 			}
 			const allText = messages.map(getTextContent).join("\n");
-			markCompletedSteps(allText, todoItems);
+			markCompletedSteps(allText, todoItems, executionSteps);
 		}
 
 		if (planModeEnabled) {

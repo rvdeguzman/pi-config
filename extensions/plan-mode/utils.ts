@@ -106,6 +106,64 @@ export interface TodoItem {
 	completed: boolean;
 }
 
+export type StepSelectionResult = { steps: number[]; error?: undefined } | { steps?: undefined; error: string };
+
+/** Parse selectors such as "1-3,5" against the current incomplete plan steps. */
+export function parseStepSelection(selector: string, items: TodoItem[]): StepSelectionResult {
+	const remaining = items.filter((item) => !item.completed);
+	if (remaining.length === 0) return { error: "The plan has no incomplete steps." };
+
+	const input = selector.trim().toLowerCase();
+	if (input === "all" || input === "all remaining") {
+		return { steps: remaining.map((item) => item.step) };
+	}
+	if (input.length === 0) return { error: "Enter a step range such as 1-3,5 or all." };
+
+	const requested = new Set<number>();
+	const maxStep = Math.max(...items.map((item) => item.step));
+	for (const part of input.split(",")) {
+		const token = part.trim();
+		const match = token.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+		if (!match) return { error: `Invalid step selector: ${token || "(empty)"}. Use a range such as 1-3,5.` };
+
+		const start = Number(match[1]);
+		const end = Number(match[2] ?? match[1]);
+		if (start < 1 || end < start) return { error: `Invalid step range: ${token}.` };
+		if (start > maxStep || end > maxStep) {
+			return { error: `Unknown plan step range: ${token}. The plan ends at step ${maxStep}.` };
+		}
+		for (let step = start; step <= end; step++) requested.add(step);
+	}
+
+	const knownSteps = new Set(items.map((item) => item.step));
+	const unknown = [...requested].filter((step) => !knownSteps.has(step));
+	if (unknown.length > 0) return { error: `Unknown plan step${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}.` };
+
+	const steps = remaining.filter((item) => requested.has(item.step)).map((item) => item.step);
+	if (steps.length === 0) return { error: "Every selected step is already complete." };
+	return { steps };
+}
+
+export function formatStepSelection(steps: number[]): string {
+	if (steps.length === 0) return "";
+	const sorted = [...new Set(steps)].sort((a, b) => a - b);
+	const ranges: string[] = [];
+	let start = sorted[0];
+	let end = start;
+
+	for (const step of sorted.slice(1)) {
+		if (step === end + 1) {
+			end = step;
+			continue;
+		}
+		ranges.push(start === end ? `${start}` : `${start}-${end}`);
+		start = step;
+		end = step;
+	}
+	ranges.push(start === end ? `${start}` : `${start}-${end}`);
+	return ranges.join(",");
+}
+
 export function cleanStepText(text: string): string {
 	let cleaned = text
 		.replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1") // Remove bold/italic
@@ -155,11 +213,16 @@ export function extractDoneSteps(message: string): number[] {
 	return steps;
 }
 
-export function markCompletedSteps(text: string, items: TodoItem[]): number {
-	const doneSteps = extractDoneSteps(text);
+export function markCompletedSteps(text: string, items: TodoItem[], allowedSteps?: readonly number[]): number {
+	const allowed = allowedSteps ? new Set(allowedSteps) : undefined;
+	const doneSteps = extractDoneSteps(text).filter((step) => !allowed || allowed.has(step));
+	let completed = 0;
 	for (const step of doneSteps) {
 		const item = items.find((t) => t.step === step);
-		if (item) item.completed = true;
+		if (item && !item.completed) {
+			item.completed = true;
+			completed++;
+		}
 	}
-	return doneSteps.length;
+	return completed;
 }
