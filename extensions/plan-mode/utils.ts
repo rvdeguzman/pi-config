@@ -104,6 +104,7 @@ export interface TodoItem {
 	step: number;
 	text: string;
 	completed: boolean;
+	todoId?: string;
 }
 
 export type StepSelectionResult = { steps: number[]; error?: undefined } | { steps?: undefined; error: string };

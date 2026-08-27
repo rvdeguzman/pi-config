@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import planModeExtension from "../plan-mode/index.ts";
+import {
+	TODO_CHANGED_EVENT,
+	TODO_SERVICE_DISCOVER_EVENT,
+	type TodoIntegrationService,
+} from "../lib/todo-integration.ts";
 import { formatStepSelection, parseStepSelection, type TodoItem } from "../plan-mode/utils.ts";
 
 type Handler = (event: any, ctx: any) => unknown;
@@ -12,8 +17,9 @@ const planItems = (): TodoItem[] => [
 	{ step: 3, text: "Run architecture verification", completed: false },
 ];
 
-function createHarness(entries: any[] = []) {
+function createHarness(entries: any[] = [], todoService?: TodoIntegrationService) {
 	const handlers = new Map<string, Handler[]>();
+	const eventListeners = new Map<string, Array<(data: unknown) => void>>();
 	const commands = new Map<string, Handler>();
 	const stateEntries: any[] = [];
 	const sentMessages: any[] = [];
@@ -25,6 +31,15 @@ function createHarness(entries: any[] = []) {
 	let activeTools = ["read", "bash", "edit", "write", "todo", "herdr_subagent"];
 
 	const pi = {
+		events: {
+			on: (event: string, listener: (data: unknown) => void) => {
+				eventListeners.set(event, [...(eventListeners.get(event) ?? []), listener]);
+				return () => eventListeners.set(event, (eventListeners.get(event) ?? []).filter((item) => item !== listener));
+			},
+			emit: (event: string, data: unknown) => {
+				for (const listener of eventListeners.get(event) ?? []) listener(data);
+			},
+		},
 		registerFlag: () => undefined,
 		getFlag: () => false,
 		registerCommand: (name: string, definition: { handler: Handler }) => commands.set(name, definition.handler),
@@ -42,8 +57,14 @@ function createHarness(entries: any[] = []) {
 		getSessionName: () => "Architecture plan",
 	};
 
+	if (todoService) {
+		eventListeners.set(TODO_SERVICE_DISCOVER_EVENT, [(request: any) => request.accept(todoService)]);
+	}
+
 	const ctx = {
 		hasUI: true,
+		cwd: "/tmp/project",
+		isIdle: () => true,
 		ui: {
 			theme: {
 				fg: (_color: string, text: string) => text,
@@ -58,6 +79,7 @@ function createHarness(entries: any[] = []) {
 		sessionManager: {
 			getEntries: () => entries,
 			getSessionFile: () => "/tmp/parent.jsonl",
+			getSessionId: () => "session-1",
 		},
 		newSession: async (options: any) => {
 			await options.setup({
@@ -74,6 +96,7 @@ function createHarness(entries: any[] = []) {
 		activeTools: () => activeTools,
 		commands,
 		ctx,
+		emitEvent: (event: string, data: unknown) => pi.events.emit(event, data),
 		handlers,
 		inputResults,
 		replacementEntries,
@@ -93,6 +116,138 @@ test("parses, filters, and formats milestone step ranges", () => {
 	assert.equal(parseStepSelection("3-2", items).error, "Invalid step range: 3-2.");
 	assert.match(parseStepSelection("8", items).error ?? "", /plan ends at step 3/);
 	assert.equal(formatStepSelection([1, 2, 3, 5, 7, 8]), "1-3,5,7-8");
+});
+
+test("captured plan steps create and retain linked file todos", async () => {
+	const records = new Map<string, any>();
+	let nextId = 1;
+	const service: TodoIntegrationService = {
+		async create(input) {
+			const id = `0000000${nextId++}`;
+			const record = {
+				id,
+				title: input.title,
+				tags: input.tags ?? [],
+				status: input.status ?? "open",
+				createdAt: "2026-01-01T00:00:00.000Z",
+				body: input.body ?? "",
+			};
+			records.set(id, record);
+			return record;
+		},
+		async getMany(ids) {
+			return ids.flatMap((id) => (records.has(id) ? [records.get(id)] : []));
+		},
+		async updateStatus(id, status) {
+			const record = { ...records.get(id), status };
+			records.set(id, record);
+			return record;
+		},
+	};
+	const h = createHarness([], service);
+	h.selectResults.push("Stay in plan mode");
+	await h.handlers.get("session_start")?.[0]?.({}, h.ctx);
+	await h.commands.get("plan")?.("", h.ctx);
+	await h.handlers.get("agent_end")?.[0]?.(
+		{
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Plan:\n1. Capture the baseline\n2. Extract the model" }],
+				},
+			],
+		},
+		h.ctx,
+	);
+
+	assert.equal(records.size, 2);
+	assert.deepEqual(
+		h.stateEntries.at(-1).todos.map((item: TodoItem) => item.todoId),
+		["00000001", "00000002"],
+	);
+	assert.deepEqual(records.get("00000001").tags, ["plan-mode", "plan-step-1"]);
+
+	// Re-emitting an unchanged/refined plan must retain links instead of duplicating todos.
+	h.selectResults.push("Stay in plan mode");
+	await h.handlers.get("agent_end")?.[0]?.(
+		{
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Plan:\n1. Capture the baseline\n2. Extract the model" }],
+				},
+			],
+		},
+		h.ctx,
+	);
+	assert.equal(records.size, 2);
+});
+
+test("plan completion closes linked todos and manual todo status changes update the plan", async () => {
+	const records = new Map(
+		planItems().map((item) => {
+			const id = `0000000${item.step}`;
+			return [
+				id,
+				{
+					id,
+					title: `${item.step}. ${item.text}`,
+					tags: ["plan-mode"],
+					status: "open",
+					createdAt: "2026-01-01T00:00:00.000Z",
+					body: "",
+				},
+			] as const;
+		}),
+	);
+	const statusUpdates: string[] = [];
+	const service: TodoIntegrationService = {
+		async create() {
+			throw new Error("unexpected create");
+		},
+		async getMany(ids) {
+			return ids.flatMap((id) => (records.has(id) ? [records.get(id)!] : []));
+		},
+		async updateStatus(id, status) {
+			statusUpdates.push(`${id}:${status}`);
+			const record = { ...records.get(id)!, status };
+			records.set(id, record);
+			return record;
+		},
+	};
+	const linkedItems = planItems();
+	for (const item of linkedItems) item.todoId = `0000000${item.step}`;
+	const h = createHarness(
+		[
+			{
+				type: "custom",
+				customType: "plan-mode",
+				data: { enabled: false, todos: linkedItems, executing: true, executionSteps: [1], planText: "Plan" },
+			},
+		],
+		service,
+	);
+	await h.handlers.get("session_start")?.[0]?.({}, h.ctx);
+	await h.handlers.get("turn_end")?.[0]?.(
+		{ message: { role: "assistant", content: [{ type: "text", text: "Done. [DONE:1]" }] } },
+		h.ctx,
+	);
+	assert.deepEqual(statusUpdates, ["00000001:closed"]);
+
+	h.emitEvent(TODO_CHANGED_EVENT, {
+		cwd: "/tmp/project",
+		action: "update",
+		source: "tool",
+		todo: { ...records.get("00000001"), status: "open" },
+	});
+	assert.equal(h.stateEntries.at(-1).todos[0].completed, false);
+	h.emitEvent(TODO_CHANGED_EVENT, {
+		cwd: "/tmp/project",
+		action: "update",
+		source: "tool",
+		todo: { ...records.get("00000001"), status: "closed" },
+	});
+	assert.equal(h.stateEntries.at(-1).todos[0].completed, true);
 });
 
 test("implementation menu selects a range and exits plan mode before dispatch", async () => {

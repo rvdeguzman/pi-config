@@ -17,6 +17,16 @@ import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import {
+	TODO_CHANGED_EVENT,
+	TODO_SERVICE_AVAILABLE_EVENT,
+	TODO_SERVICE_DISCOVER_EVENT,
+	isIntegratedTodoClosed,
+	type TodoChangedEvent,
+	type TodoIntegrationService,
+	type TodoServiceDiscovery,
+} from "../lib/todo-integration.ts";
+import {
+	extractDoneSteps,
 	extractTodoItems,
 	formatStepSelection,
 	markCompletedSteps,
@@ -60,6 +70,32 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	let todoItems: TodoItem[] = [];
 	let planText = "";
 	let toolsBeforePlanMode: string[] | undefined;
+	let todoService: TodoIntegrationService | undefined;
+	let currentCtx: ExtensionContext | undefined;
+
+	const unsubscribeTodoService = pi.events.on(TODO_SERVICE_AVAILABLE_EVENT, (service) => {
+		todoService = service as TodoIntegrationService;
+	});
+	pi.events.emit(TODO_SERVICE_DISCOVER_EVENT, {
+		accept(service: TodoIntegrationService) {
+			todoService = service;
+		},
+	} satisfies TodoServiceDiscovery);
+	const unsubscribeTodoChanges = pi.events.on(TODO_CHANGED_EVENT, (data) => {
+		const event = data as TodoChangedEvent;
+		if (!currentCtx || event.cwd !== currentCtx.cwd || event.action === "delete") return;
+		const item = todoItems.find((candidate) => candidate.todoId === event.todo.id);
+		if (!item) return;
+
+		const completed = isIntegratedTodoClosed(event.todo.status);
+		if (item.completed === completed) return;
+		item.completed = completed;
+		updateStatus(currentCtx);
+		persistState();
+		if (event.source !== "integration" && currentCtx.isIdle()) {
+			completeMilestoneIfReady(currentCtx);
+		}
+	});
 
 	pi.registerFlag("plan", {
 		description: "Start in plan mode (read-only exploration)",
@@ -135,6 +171,70 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		});
 	}
 
+	async function ensureLinkedTodos(ctx: ExtensionContext): Promise<void> {
+		if (!todoService) return;
+		let changed = false;
+		for (const item of todoItems) {
+			if (item.todoId) continue;
+			try {
+				const todo = await todoService.create(
+					{
+						title: `${item.step}. ${item.text}`,
+						tags: ["plan-mode", `plan-step-${item.step}`],
+						status: item.completed ? "closed" : "open",
+						body: `Linked to plan-mode step ${item.step}.\n\n${item.text}`,
+					},
+					ctx,
+				);
+				item.todoId = todo.id;
+				changed = true;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Could not create todo for plan step ${item.step}: ${message}`, "warning");
+			}
+		}
+		if (changed) persistState();
+	}
+
+	async function reconcileLinkedTodos(ctx: ExtensionContext): Promise<void> {
+		if (!todoService) return;
+		const linkedIds = todoItems.flatMap((item) => (item.todoId ? [item.todoId] : []));
+		if (linkedIds.length === 0) return;
+		try {
+			const records = await todoService.getMany(linkedIds, ctx);
+			const byId = new Map(records.map((record) => [record.id, record]));
+			let changed = false;
+			for (const item of todoItems) {
+				if (!item.todoId) continue;
+				const record = byId.get(item.todoId);
+				if (!record) continue;
+				const completed = isIntegratedTodoClosed(record.status);
+				if (item.completed !== completed) {
+					item.completed = completed;
+					changed = true;
+				}
+			}
+			if (changed) persistState();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Could not synchronize plan todos: ${message}`, "warning");
+		}
+	}
+
+	async function closeLinkedTodos(ctx: ExtensionContext, steps: readonly number[]): Promise<void> {
+		if (!todoService) return;
+		const selected = new Set(steps);
+		for (const item of todoItems) {
+			if (!item.completed || !item.todoId || !selected.has(item.step)) continue;
+			try {
+				await todoService.updateStatus(item.todoId, "closed", ctx);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Could not close todo for plan step ${item.step}: ${message}`, "warning");
+			}
+		}
+	}
+
 	function togglePlanMode(ctx: ExtensionContext): void {
 		if (executionMode && todoItems.length > 0) {
 			executionMode = false;
@@ -169,6 +269,19 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => togglePlanMode(ctx),
 	});
 
+	function mergeExtractedPlan(extracted: TodoItem[]): TodoItem[] {
+		const existing = new Map(todoItems.map((item) => [`${item.step}\u0000${item.text}`, item]));
+		return extracted.map((item) => {
+			const previous = existing.get(`${item.step}\u0000${item.text}`);
+			return previous ? { ...item, completed: previous.completed, todoId: previous.todoId } : item;
+		});
+	}
+
+	function formatPlanItem(item: TodoItem): string {
+		const todoRef = item.todoId ? ` [TODO-${item.todoId}]` : "";
+		return `${item.step}. ${item.text}${todoRef}`;
+	}
+
 	function incompleteSteps(items = todoItems): number[] {
 		return items.filter((item) => !item.completed).map((item) => item.step);
 	}
@@ -183,11 +296,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		capturedPlan = planText,
 		steps = executionSteps.length > 0 ? executionSteps : incompleteSteps(items),
 	): string {
-		const remainingList = selectedIncompleteItems(items, steps).map((item) => `${item.step}. ${item.text}`).join("\n");
+		const remainingList = selectedIncompleteItems(items, steps).map(formatPlanItem).join("\n");
 		const planDetails = capturedPlan.trim()
 			? `\n\nCaptured planning response:\n${capturedPlan.trim()}`
 			: "";
-		return `Implement the selected milestone from the agreed plan.\n\nSelected steps:\n${remainingList}${planDetails}\n\nExecute only the selected steps, in order. After completing a step, include a [DONE:n] tag in your response. Do not begin unselected steps.`;
+		return `Implement the selected milestone from the agreed plan.\n\nSelected steps:\n${remainingList}${planDetails}\n\nExecute only the selected steps, in order. Each linked TODO is the same source of progress as the plan widget: closing it marks the step complete, and a [DONE:n] tag closes it automatically. Do not begin unselected steps.`;
 	}
 
 	async function chooseImplementationSteps(ctx: ExtensionContext, selector: string): Promise<number[] | undefined> {
@@ -239,6 +352,39 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		enablePlanModeTools();
 		updateStatus(ctx);
 		persistState();
+	}
+
+	function completeMilestoneIfReady(ctx: ExtensionContext): boolean {
+		if (!executionMode || todoItems.length === 0) return false;
+		const selected = new Set(executionSteps);
+		const milestoneItems = todoItems.filter((item) => selected.has(item.step));
+		if (milestoneItems.length === 0 || !milestoneItems.every((item) => item.completed)) return false;
+
+		const completedList = milestoneItems.map((item) => `~~${item.step}. ${item.text}~~`).join("\n");
+		const remaining = incompleteSteps();
+		if (remaining.length === 0) {
+			pi.sendMessage(
+				{ customType: "plan-complete", content: `**Plan Complete!** ✓\n\n${completedList}`, display: true },
+				{ triggerTurn: false },
+			);
+			executionMode = false;
+			executionSteps = [];
+			todoItems = [];
+			planText = "";
+			updateStatus(ctx);
+			persistState();
+		} else {
+			pi.sendMessage(
+				{
+					customType: "plan-milestone-complete",
+					content: `**Milestone Complete!** ✓\n\n${completedList}\n\nRemaining steps: ${formatStepSelection(remaining)}\nRun /implement to choose the next milestone.`,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+			returnToPlanMode(ctx);
+		}
+		return true;
 	}
 
 	function implementHere(ctx: ExtensionContext, steps: number[]): boolean {
@@ -350,7 +496,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("No captured plan. Enter /plan and ask for a numbered plan first.", "info");
 				return;
 			}
-			const list = todoItems.map((item) => `${item.step}. ${item.completed ? "✓" : "○"} ${item.text}`).join("\n");
+			const list = todoItems
+				.map((item) => `${item.completed ? "✓" : "○"} ${formatPlanItem(item)}`)
+				.join("\n");
 			ctx.ui.notify(`Plan Progress:\n${list}`, "info");
 		},
 	});
@@ -424,7 +572,7 @@ Do NOT attempt to make changes - just describe what you would do.`,
 
 		if (executionMode && todoItems.length > 0) {
 			const remaining = selectedIncompleteItems();
-			const todoList = remaining.map((t) => `${t.step}. ${t.text}`).join("\n");
+			const todoList = remaining.map(formatPlanItem).join("\n");
 			return {
 				message: {
 					customType: "plan-execution-context",
@@ -434,7 +582,7 @@ Remaining steps:
 ${todoList}
 
 Execute each step in order.
-After completing a step, include a [DONE:n] tag in your response.`,
+Closing a linked TODO marks its plan step complete; a [DONE:n] tag closes it automatically.`,
 					display: false,
 				},
 			};
@@ -447,7 +595,13 @@ After completing a step, include a [DONE:n] tag in your response.`,
 		if (!isAssistantMessage(event.message)) return;
 
 		const text = getTextContent(event.message);
+		const activeSteps = new Set(executionSteps);
+		const newlyCompleted = extractDoneSteps(text).filter((step) => {
+			const item = todoItems.find((candidate) => candidate.step === step);
+			return activeSteps.has(step) && item !== undefined && !item.completed;
+		});
 		if (markCompletedSteps(text, todoItems, executionSteps) > 0) {
+			await closeLinkedTodos(ctx, newlyCompleted);
 			updateStatus(ctx);
 		}
 		persistState();
@@ -457,34 +611,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
 	pi.on("agent_end", async (event, ctx) => {
 		// Check if the selected milestone is complete.
 		if (executionMode && todoItems.length > 0) {
-			const selected = new Set(executionSteps);
-			const milestoneItems = todoItems.filter((item) => selected.has(item.step));
-			if (milestoneItems.length > 0 && milestoneItems.every((item) => item.completed)) {
-				const completedList = milestoneItems.map((item) => `~~${item.step}. ${item.text}~~`).join("\n");
-				const remaining = incompleteSteps();
-				if (remaining.length === 0) {
-					pi.sendMessage(
-						{ customType: "plan-complete", content: `**Plan Complete!** ✓\n\n${completedList}`, display: true },
-						{ triggerTurn: false },
-					);
-					executionMode = false;
-					executionSteps = [];
-					todoItems = [];
-					planText = "";
-					updateStatus(ctx);
-					persistState();
-				} else {
-					pi.sendMessage(
-						{
-							customType: "plan-milestone-complete",
-							content: `**Milestone Complete!** ✓\n\n${completedList}\n\nRemaining steps: ${formatStepSelection(remaining)}\nRun /implement to choose the next milestone.`,
-							display: true,
-						},
-						{ triggerTurn: false },
-					);
-					returnToPlanMode(ctx);
-				}
-			}
+			completeMilestoneIfReady(ctx);
 			return;
 		}
 
@@ -496,12 +623,13 @@ After completing a step, include a [DONE:n] tag in your response.`,
 			const assistantText = getTextContent(lastAssistant);
 			const extracted = extractTodoItems(assistantText);
 			if (extracted.length > 0) {
-				todoItems = extracted;
+				todoItems = mergeExtractedPlan(extracted);
 				planText = assistantText;
 			}
 		}
 
 		if (todoItems.length === 0) return;
+		await ensureLinkedTodos(ctx);
 		persistState();
 
 		// Show plan steps and prompt for next action
@@ -550,6 +678,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
 	// Restore state on session start/resume
 	pi.on("session_start", async (_event, ctx) => {
+		currentCtx = ctx;
 		if (pi.getFlag("plan") === true) {
 			planModeEnabled = true;
 		}
@@ -598,9 +727,18 @@ After completing a step, include a [DONE:n] tag in your response.`,
 			markCompletedSteps(allText, todoItems, executionSteps);
 		}
 
+		await ensureLinkedTodos(ctx);
+		await reconcileLinkedTodos(ctx);
 		if (planModeEnabled) {
 			enablePlanModeTools();
 		}
 		updateStatus(ctx);
+		if (executionMode && ctx.isIdle()) completeMilestoneIfReady(ctx);
+	});
+
+	pi.on("session_shutdown", async () => {
+		currentCtx = undefined;
+		unsubscribeTodoChanges();
+		unsubscribeTodoService();
 	});
 }

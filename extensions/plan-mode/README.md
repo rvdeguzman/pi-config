@@ -13,7 +13,9 @@ A global Pi extension providing read-only planning and tracked implementation.
 
 You can also start Pi directly in plan mode with `pi --plan`.
 
-While planning, `bash`, `edit`, `write`, `todo`, and `herdr_subagent` are disabled. Read-only inspection, questions, and web research remain available. Plans written as numbered steps under a `Plan:` heading are captured automatically. During implementation, `[DONE:n]` markers update the progress widget.
+While planning, `bash`, `edit`, `write`, `todo`, and `herdr_subagent` are disabled. Read-only inspection, questions, and web research remain available. Plans written as numbered steps under a `Plan:` heading are captured automatically.
+
+Each captured plan step is linked to its own file-based todo tagged `plan-mode`. The plan widget and todo status synchronize in both directions: `[DONE:n]` closes the linked todo, while closing or reopening it through the `todo` tool or `/todos` updates the plan widget. Linked todo IDs survive fresh milestone handoffs and session reloads. Discarding a plan leaves its generated open todos intact as normal project tasks.
 
 The interactive completion menu offers all three implementation strategies and then asks for a milestone range. Step selectors accept individual steps, comma-separated ranges, or `all`, for example `/implement 1-3,5`. Running `/implement` without arguments opens the selector.
 

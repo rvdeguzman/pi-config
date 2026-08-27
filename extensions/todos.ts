@@ -52,6 +52,16 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import {
+	TODO_CHANGED_EVENT,
+	TODO_SERVICE_AVAILABLE_EVENT,
+	TODO_SERVICE_DISCOVER_EVENT,
+	type CreateIntegratedTodoInput,
+	type IntegratedTodoRecord,
+	type TodoChangedEvent,
+	type TodoIntegrationService,
+	type TodoServiceDiscovery,
+} from "./lib/todo-integration.ts";
 
 const TODO_DIR_NAME = ".pi/todos";
 const TODO_PATH_ENV = "PI_TODO_PATH";
@@ -75,6 +85,17 @@ interface TodoFrontMatter {
 
 interface TodoRecord extends TodoFrontMatter {
 	body: string;
+}
+
+function toIntegratedTodo(todo: TodoRecord): IntegratedTodoRecord {
+	return {
+		id: todo.id,
+		title: todo.title,
+		tags: [...todo.tags],
+		status: todo.status,
+		createdAt: todo.created_at,
+		body: todo.body,
+	};
 }
 
 interface LockInfo {
@@ -1286,6 +1307,31 @@ async function appendTodoBody(filePath: string, todo: TodoRecord, text: string):
 	return todo;
 }
 
+async function createTodoRecord(
+	todosDir: string,
+	input: CreateIntegratedTodoInput,
+	ctx: ExtensionContext,
+): Promise<TodoRecord | { error: string }> {
+	await ensureTodosDir(todosDir);
+	const id = await generateTodoId(todosDir);
+	const filePath = getTodoPath(todosDir, id);
+	const todo: TodoRecord = {
+		id,
+		title: input.title,
+		tags: input.tags ?? [],
+		status: input.status ?? "open",
+		created_at: new Date().toISOString(),
+		body: input.body ?? "",
+	};
+
+	const result = await withTodoLock(todosDir, id, ctx, async () => {
+		await writeTodoFile(filePath, todo);
+		return todo;
+	});
+	if (typeof result === "object" && "error" in result) return { error: result.error };
+	return todo;
+}
+
 async function updateTodoStatus(
 	todosDir: string,
 	id: string,
@@ -1429,12 +1475,65 @@ async function deleteTodo(
 	return result;
 }
 
+function publishTodoChange(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	action: TodoChangedEvent["action"],
+	source: TodoChangedEvent["source"],
+	todo: TodoRecord,
+): void {
+	pi.events.emit(TODO_CHANGED_EVENT, {
+		cwd: ctx.cwd,
+		action,
+		source,
+		todo: toIntegratedTodo(todo),
+	} satisfies TodoChangedEvent);
+}
+
+export function createTodoIntegrationService(pi: ExtensionAPI): TodoIntegrationService {
+	return {
+		async create(input, ctx) {
+			const result = await createTodoRecord(getTodosDir(ctx.cwd), input, ctx);
+			if ("error" in result) throw new Error(result.error);
+			publishTodoChange(pi, ctx, "create", "integration", result);
+			return toIntegratedTodo(result);
+		},
+		async getMany(ids, ctx) {
+			const todosDir = getTodosDir(ctx.cwd);
+			const records: IntegratedTodoRecord[] = [];
+			for (const rawId of ids) {
+				const validated = validateTodoId(rawId);
+				if ("error" in validated) continue;
+				const record = await ensureTodoExists(getTodoPath(todosDir, validated.id), validated.id);
+				if (record) records.push(toIntegratedTodo(record));
+			}
+			return records;
+		},
+		async updateStatus(id, status, ctx) {
+			const result = await updateTodoStatus(getTodosDir(ctx.cwd), id, status, ctx);
+			if ("error" in result) throw new Error(result.error);
+			publishTodoChange(pi, ctx, "update", "integration", result);
+			return toIntegratedTodo(result);
+		},
+	};
+}
+
 export default function todosExtension(pi: ExtensionAPI) {
+	const integrationService = createTodoIntegrationService(pi);
+	const unsubscribeDiscovery = pi.events.on(TODO_SERVICE_DISCOVER_EVENT, (request) => {
+		(request as TodoServiceDiscovery).accept(integrationService);
+	});
+	pi.events.emit(TODO_SERVICE_AVAILABLE_EVENT, integrationService);
+
 	pi.on("session_start", async (_event, ctx) => {
 		const todosDir = getTodosDir(ctx.cwd);
 		await ensureTodosDir(todosDir);
 		const settings = await readTodoSettings(todosDir);
 		await garbageCollectTodos(todosDir, settings);
+	});
+
+	pi.on("session_shutdown", async () => {
+		unsubscribeDiscovery();
 	});
 
 	const todosDirLabel = getTodosDirLabel(process.cwd());
@@ -1511,33 +1610,26 @@ export default function todosExtension(pi: ExtensionAPI) {
 							details: { action: "create", error: "title required" },
 						};
 					}
-					await ensureTodosDir(todosDir);
-					const id = await generateTodoId(todosDir);
-					const filePath = getTodoPath(todosDir, id);
-					const todo: TodoRecord = {
-						id,
-						title: params.title,
-						tags: params.tags ?? [],
-						status: params.status ?? "open",
-						created_at: new Date().toISOString(),
-						body: params.body ?? "",
-					};
-
-					const result = await withTodoLock(todosDir, id, ctx, async () => {
-						await writeTodoFile(filePath, todo);
-						return todo;
-					});
-
-					if (typeof result === "object" && "error" in result) {
+					const result = await createTodoRecord(
+						todosDir,
+						{
+							title: params.title,
+							tags: params.tags,
+							status: params.status,
+							body: params.body,
+						},
+						ctx,
+					);
+					if ("error" in result) {
 						return {
 							content: [{ type: "text", text: result.error }],
 							details: { action: "create", error: result.error },
 						};
 					}
-
+					publishTodoChange(pi, ctx, "create", "tool", result);
 					return {
-						content: [{ type: "text", text: serializeTodoForAgent(todo) }],
-						details: { action: "create", todo },
+						content: [{ type: "text", text: serializeTodoForAgent(result) }],
+						details: { action: "create", todo: result },
 					};
 				}
 
@@ -1588,6 +1680,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 
 					const updatedTodo = result as TodoRecord;
+					publishTodoChange(pi, ctx, "update", "tool", updatedTodo);
 					return {
 						content: [{ type: "text", text: serializeTodoForAgent(updatedTodo) }],
 						details: { action: "update", todo: updatedTodo },
@@ -1716,9 +1809,11 @@ export default function todosExtension(pi: ExtensionAPI) {
 						};
 					}
 
+					const deletedTodo = result as TodoRecord;
+					publishTodoChange(pi, ctx, "delete", "tool", deletedTodo);
 					return {
-						content: [{ type: "text", text: serializeTodoForAgent(result as TodoRecord) }],
-						details: { action: "delete", todo: result as TodoRecord },
+						content: [{ type: "text", text: serializeTodoForAgent(deletedTodo) }],
+						details: { action: "delete", todo: deletedTodo },
 					};
 				}
 			}
@@ -1948,6 +2043,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 							ctx.ui.notify(result.error, "error");
 							return "stay";
 						}
+						publishTodoChange(pi, ctx, "delete", "ui", result);
 						const updatedTodos = await listTodos(todosDir);
 						selector?.setTodos(updatedTodos);
 						ctx.ui.notify(`Deleted todo ${formatTodoId(record.id)}`, "info");
@@ -1961,6 +2057,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return "stay";
 					}
 
+					publishTodoChange(pi, ctx, "update", "ui", result);
 					const updatedTodos = await listTodos(todosDir);
 					selector?.setTodos(updatedTodos);
 					ctx.ui.notify(
