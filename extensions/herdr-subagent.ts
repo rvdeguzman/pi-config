@@ -43,6 +43,7 @@ import { createAgentRefAutocomplete } from "./lib/agent-ref-autocomplete.ts";
 import { subagentProfiles } from "./lib/subagent-profiles.ts";
 
 const CHILD_ENV = "PI_HERDR_SUBAGENT_CHILD";
+const WORKER_CHILD_ENV = "PI_HERDR_WORKER_CHILD";
 const RESULT_ENV = "PI_HERDR_SUBAGENT_RESULT";
 /**
  * Set to 1 to make the child pi shut down as soon as it reports its result.
@@ -52,6 +53,9 @@ const RESULT_ENV = "PI_HERDR_SUBAGENT_RESULT";
  */
 const EXIT_ON_FINISH_ENV = "PI_HERDR_SUBAGENT_EXIT_ON_FINISH";
 const RUNS_DIR = "herdr-subagents";
+const WORKER_RUNS_DIR = "herdr-workers";
+const WORKER_PROFILE = "worker";
+const DELEGATION_TOOL_NAMES = new Set(["herdr_subagent", "herdr_worker"]);
 const EXIT_SENTINEL_PREFIX = "__pi_herdr_subagent_exit__";
 const POLL_INTERVAL_MS = 500;
 /** Poll herdr's agent lifecycle state every N pane polls (it changes slowly). */
@@ -429,15 +433,15 @@ function formatDuration(startedAt: number | undefined, finishedAt = Date.now()):
 }
 
 /** herdr agent names must match [a-z][a-z0-9_-]{0,31} and be unique among live agents. */
-function agentNameFor(sessionId: string): string {
-	return `sub-${sessionId.replace(/-/g, "").slice(0, 8)}`;
+function agentNameFor(sessionId: string, prefix = "sub"): string {
+	return `${prefix}-${sessionId.replace(/-/g, "").slice(0, 8)}`;
 }
 
-function tabLabelFor(task: string): string {
+function tabLabelFor(task: string, prefix = "sub"): string {
 	const firstLine = task.trim().split("\n", 1)[0] ?? "";
 	const compact = firstLine.replace(/\s+/g, " ").trim();
 	const label = compact.length > 28 ? `${compact.slice(0, 27)}…` : compact;
-	return `sub: ${label || "task"}`;
+	return `${prefix}: ${label || "task"}`;
 }
 
 function detailsFor(spec: RunSpec, status: RunStatus, extra: Partial<RunDetails> = {}): RunDetails {
@@ -579,6 +583,19 @@ export function isRetryableProviderFailure(value: ChildResult | Error | string):
 	);
 }
 
+function resolveChildTools(pi: ExtensionAPI, requestedTools: string[], profileName: string): string[] {
+	const knownTools = new Map(pi.getAllTools().map((tool) => [tool.name, tool]));
+	const unknownTools = requestedTools.filter((name) => !knownTools.has(name));
+	if (unknownTools.length > 0) {
+		throw new Error(`Agent profile ${profileName} has unknown tool(s): ${unknownTools.join(", ")}.`);
+	}
+	const sdkTools = requestedTools.filter((name) => knownTools.get(name)?.sourceInfo?.source === "sdk");
+	if (sdkTools.length > 0) {
+		throw new Error(`Agent profile ${profileName} uses SDK-only tool(s) unavailable to child Pi: ${sdkTools.join(", ")}.`);
+	}
+	return [...new Set(requestedTools.filter((name) => !DELEGATION_TOOL_NAMES.has(name)))];
+}
+
 function resolveModel(
 	ctx: ExtensionContext,
 	providerOverride: string | undefined,
@@ -655,6 +672,10 @@ async function createChildPane(
 /* -------------------------------------------------------------------------- */
 
 export default function herdrSubagentExtension(pi: ExtensionAPI): void {
+	// Fire-and-forget workers load this extension only so it can suppress both
+	// parent-only delegation tools in the child process.
+	if (process.env[WORKER_CHILD_ENV] === "1") return;
+
 	if (process.env[CHILD_ENV] === "1") {
 		const resultPath = process.env[RESULT_ENV];
 		if (!resultPath) {
@@ -690,6 +711,114 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	const availableProfileNames = subagentProfiles.listSync().map((profile) => profile.name);
 
 	pi.registerTool({
+		name: "herdr_worker",
+		label: "Herdr Worker",
+		description: "Dispatch one implementation task to the fixed worker profile in a separate Pi process. Fire-and-forget: returns the Herdr tab, pane, attach, capture, and cleanup commands immediately without waiting for or polling the result.",
+		promptSnippet: "Dispatch an implementation task to a fire-and-forget worker in Herdr",
+		promptGuidelines: [
+			"Use herdr_worker only for a self-contained implementation task that can continue independently after dispatch.",
+			"herdr_worker returns immediately and does not retrieve the worker result; use its attach or capture command to inspect the child.",
+		],
+		parameters: Type.Object({
+			task: Type.String({
+				description: "The complete implementation task for the worker Pi process",
+			}),
+			cwd: Type.Optional(
+				Type.String({
+					description: "Working directory. Defaults to the current project.",
+				}),
+			),
+		}),
+
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if (!params.task.trim()) throw new Error("Worker task must not be empty.");
+			if (signal?.aborted) throw new Error("Worker dispatch aborted.");
+
+			const profile = await subagentProfiles.get(WORKER_PROFILE);
+			const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
+			const thinking = profile.thinking ?? pi.getThinkingLevel();
+			const modelRefs =
+				profile.model === undefined ? [undefined] : Array.isArray(profile.model) ? profile.model : [profile.model];
+			const selectedModel = resolveModel(ctx, undefined, modelRefs[0]);
+			const childTools = resolveChildTools(pi, profile.tools ?? pi.getActiveTools(), profile.name);
+			await validateCwd(cwd);
+
+			const version = await pi.exec("herdr", ["--version"], { timeout: 5_000 });
+			if (version.code !== 0) {
+				throw new Error(`herdr is required for workers: ${version.stderr.trim() || "herdr not found"}`);
+			}
+
+			const childSessionId = randomUUID();
+			const runDir = path.join(getAgentDir(), WORKER_RUNS_DIR, ctx.sessionManager.getSessionId(), childSessionId);
+			const promptPath = path.join(runDir, "task.md");
+			const sessionDir = path.join(runDir, "session");
+			await mkdir(sessionDir, { recursive: true, mode: 0o700 });
+			await writeFile(promptPath, `# Worker task\n\n${params.task}\n`, {
+				encoding: "utf8",
+				mode: 0o600,
+			});
+
+			const agentName = agentNameFor(childSessionId, "worker");
+			const trusted = isSameOrDescendant(path.resolve(ctx.cwd), cwd) && ctx.isProjectTrusted();
+			const piArgs = [
+				...getPiInvocationParts(),
+				"--provider",
+				selectedModel.provider,
+				"--model",
+				selectedModel.model,
+				"--thinking",
+				thinking,
+				...(childTools.length > 0 ? ["--tools", childTools.join(",")] : ["--no-tools"]),
+				"--session-dir",
+				sessionDir,
+				"--name",
+				agentName,
+				trusted ? "--approve" : "--no-approve",
+				"--extension",
+				EXTENSION_PATH,
+				`@${promptPath}`,
+			];
+			const childCommand = ["env", `${WORKER_CHILD_ENV}=1`, piArgs.map(shellQuote).join(" ")].join(" ");
+
+			const created = await createChildPane(pi, cwd, tabLabelFor(params.task, "worker"));
+			const attachCommand = `herdr tab focus ${created.tabId}`;
+			const captureCommand = `herdr pane read ${created.paneId} --source recent-unwrapped --lines ${CAPTURE_LINES}`;
+			const killCommand = `herdr tab close ${created.tabId}`;
+			try {
+				await herdrOk(pi, ["pane", "run", created.paneId, childCommand]);
+			} catch (error) {
+				await pi.exec("herdr", ["tab", "close", created.tabId], { timeout: 10_000 }).catch(() => undefined);
+				throw error;
+			}
+
+			const text = [
+				`Worker dispatched in Herdr tab ${created.tabId}, pane ${created.paneId}.`,
+				`Attach: ${attachCommand}`,
+				`Capture: ${captureCommand}`,
+				`Clean up: ${killCommand}`,
+			].join("\n");
+			return {
+				content: [{ type: "text", text }],
+				details: {
+					status: "dispatched",
+					task: params.task,
+					cwd,
+					workspaceId: created.workspaceId,
+					tabId: created.tabId,
+					paneId: created.paneId,
+					agentName,
+					attachCommand,
+					captureCommand,
+					killCommand,
+					provider: selectedModel.provider,
+					model: selectedModel.model,
+					thinking,
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "herdr_subagent",
 		label: "Herdr Subagent",
 		description: `Run one delegated task in a separate pi process using a named agent profile. Available profiles: ${availableProfileNames.length ? availableProfileNames.join(", ") : "(none)"}. Profiles are refreshed at call time; sibling calls may run concurrently. Each child remains visible and inspectable in Herdr; output is capped at 50KB or 2000 lines.`,
@@ -719,16 +848,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			const thinking = profile.thinking ?? pi.getThinkingLevel();
 			const modelRefs =
 				profile.model === undefined ? [undefined] : Array.isArray(profile.model) ? profile.model : [profile.model];
-			const allTools = pi.getAllTools();
-			const knownTools = new Map(allTools.map((tool) => [tool.name, tool]));
-			const requestedTools = profile.tools ?? pi.getActiveTools();
-			const unknownTools = requestedTools.filter((name) => !knownTools.has(name));
-			if (unknownTools.length > 0)
-				throw new Error(`Agent profile ${profile.name} has unknown tool(s): ${unknownTools.join(", ")}.`);
-			const sdkTools = requestedTools.filter((name) => knownTools.get(name)?.sourceInfo?.source === "sdk");
-			if (sdkTools.length > 0)
-				throw new Error(`Agent profile ${profile.name} uses SDK-only tool(s) unavailable to child Pi: ${sdkTools.join(", ")}.`);
-			const childTools = [...new Set(requestedTools.filter((name) => name !== "herdr_subagent"))];
+			const childTools = resolveChildTools(pi, profile.tools ?? pi.getActiveTools(), profile.name);
 			await validateCwd(cwd);
 			const version = await pi.exec("herdr", ["--version"], { timeout: 5_000 });
 			if (version.code !== 0)

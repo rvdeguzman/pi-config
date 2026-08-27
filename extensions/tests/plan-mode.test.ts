@@ -28,7 +28,7 @@ function createHarness(entries: any[] = [], todoService?: TodoIntegrationService
 	const replacementPrompts: string[] = [];
 	const selectResults: Array<string | undefined> = [];
 	const inputResults: Array<string | undefined> = [];
-	let activeTools = ["read", "bash", "edit", "write", "todo", "herdr_subagent"];
+	let activeTools = ["read", "bash", "edit", "write", "todo", "herdr_subagent", "herdr_worker"];
 
 	const pi = {
 		events: {
@@ -258,6 +258,7 @@ test("implementation menu selects a range and exits plan mode before dispatch", 
 	await h.handlers.get("session_start")?.[0]?.({}, h.ctx);
 	await h.commands.get("plan")?.("", h.ctx);
 	assert.equal(h.activeTools().includes("bash"), false, "plan mode should disable implementation tools");
+	assert.equal(h.activeTools().includes("herdr_worker"), false, "plan mode should disable fire-and-forget workers");
 
 	await h.handlers.get("agent_end")?.[0]?.(
 		{

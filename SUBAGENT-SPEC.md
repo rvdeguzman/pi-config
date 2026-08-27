@@ -6,14 +6,16 @@ Approved design specification. This replaces the previous asynchronous RPC/fleet
 
 ## Goal
 
-Keep the current observable Herdr-backed subagent runner, while moving child runtime configuration into small named agent profiles.
+Keep the observable Herdr-backed subagent runner, with child runtime configuration in small named agent profiles, and provide a second fire-and-forget path for implementation workers.
 
 The responsibility split is:
 
-- The caller/parent chooses the agent profile.
+- The caller/parent chooses the agent profile for a blocking `herdr_subagent` call.
+- `herdr_worker` always uses the `worker` profile.
 - The caller/parent writes the complete delegated task.
 - The agent profile selects the model, thinking level, and tools.
 - The caller/parent decides how many children to launch and whether those calls are parallel or sequential.
+- `herdr_subagent` waits for a result; `herdr_worker` returns launch coordinates immediately and never polls for completion.
 
 There is no workflow engine and no profile-level concurrency policy.
 
@@ -78,7 +80,8 @@ Rules:
 ### Tool resolution
 
 - `tools` is the child's complete active-tool allowlist.
-- A missing `tools` value inherits the caller's active tools, excluding `herdr_subagent` to prevent recursive delegation.
+- A missing `tools` value inherits the caller's active tools, excluding both `herdr_subagent` and `herdr_worker` to prevent recursive delegation.
+- Both delegation tools are removed from every child tool allowlist, even if a profile names them explicitly.
 - Unknown tool names are configuration errors and must be reported before launching the child.
 - Tool restrictions are capability reduction inside Pi, not an operating-system sandbox.
 
@@ -86,7 +89,7 @@ Read-only profiles should not include `bash`: a prompt cannot prevent a shell to
 
 ## Tool API
 
-The model-facing tool remains one-child-per-call:
+The blocking model-facing tool remains one-child-per-call:
 
 ```ts
 herdr_subagent({
@@ -96,7 +99,18 @@ herdr_subagent({
 })
 ```
 
-The tool does not accept model, thinking, tools, parallel count, chain, or workflow parameters. Those concerns belong to the selected profile or the caller.
+The fire-and-forget worker tool is also one-child-per-call, but fixes profile selection to `worker`:
+
+```ts
+herdr_worker({
+  task: string;
+  cwd?: string;
+})
+```
+
+`herdr_worker` returns the created workspace, tab, and pane IDs plus attach, capture, and cleanup commands as soon as `herdr pane run` accepts the launch. It does not create or poll a result file, read pane output, query agent state, retry another model, or deliver a later completion result.
+
+Neither tool accepts model, thinking, tools, parallel count, chain, or workflow parameters. Those concerns belong to the selected/fixed profile or the caller.
 
 Example:
 
@@ -111,10 +125,11 @@ The extension exposes the available profile names in the tool description so the
 
 ## Concurrency
 
-The caller controls concurrency by issuing the desired number of ordinary `herdr_subagent` calls.
+The caller controls concurrency by issuing the desired number of ordinary `herdr_subagent` or `herdr_worker` calls.
 
 - Sibling calls emitted by the parent may execute concurrently through Pi's normal parallel tool execution.
-- Sequential calls remain sequential when the parent waits for one result before issuing the next.
+- Sequential subagent calls remain sequential when the parent waits for one result before issuing the next.
+- Worker calls return immediately after dispatch, so later parent work does not depend on worker completion unless the parent or user explicitly inspects the returned Herdr pane.
 - Profiles do not contain `max_parallel` or any equivalent field.
 - The current extension-wide serial queue must be removed.
 - The implementation may retain a fixed defensive process ceiling only as a safety guard; it must not choose how many agents the caller should spawn.
@@ -168,7 +183,9 @@ When profiles are available, add concise guidance to the parent system prompt:
 
 ## Herdr execution
 
-The existing Herdr transport remains the execution backend:
+The existing Herdr transport remains the execution backend.
+
+For `herdr_subagent`:
 
 1. Resolve and validate the selected profile.
 2. Resolve the ordered model candidates, thinking level, and tool allowlist.
@@ -179,13 +196,23 @@ The existing Herdr transport remains the execution backend:
 7. Use Herdr pane and agent state for progress, blocked state, attachment, and inspection.
 8. Return the bounded result with attach, capture, cleanup, and child-session information.
 
-Completed children and their Pi sessions remain alive for inspection and continued conversation until explicitly closed. A fallback attempt belongs to the same logical tool call and must not produce multiple successful results.
+For `herdr_worker`:
+
+1. Resolve the fixed `worker` profile and its first model candidate, thinking level, and tool allowlist.
+2. Write the caller-authored task to a private worker run directory.
+3. Create a background Herdr tab and launch the child Pi process with a worker-child environment marker.
+4. Return the workspace/tab/pane IDs and attach, capture, and cleanup commands immediately after successful dispatch.
+5. Perform no completion, pane-output, agent-state, sentinel, or result-file polling.
+
+Completed children and their Pi sessions remain alive for inspection and continued conversation until explicitly closed. A blocking subagent fallback attempt belongs to the same logical tool call and must not produce multiple successful results. Fire-and-forget workers do not attempt model fallback because the parent does not observe completion.
 
 ## Trust and isolation
 
 - A child working inside the trusted caller project may inherit project approval.
 - A child outside that tree starts without project approval.
-- Child mode must not register `herdr_subagent`, preventing recursive spawning.
+- Blocking child mode registers only its result reporter and does not register delegation tools.
+- Worker child mode registers neither `herdr_subagent` nor `herdr_worker` and performs no result reporting.
+- Both delegation tool names are excluded from all child `--tools` allowlists.
 - Profile file contents are configuration; Markdown bodies are ignored.
 - Shell commands must continue to use argument-safe construction and private run files.
 - Returned output remains capped at Pi's standard 50 KB / 2,000-line tool limit; the complete child session stays on disk.
@@ -210,7 +237,9 @@ Add focused tests for:
 - Ordered fallback on retryable provider failure.
 - No fallback on task/tool failure or abort.
 - Inherited model and thinking behavior.
-- Tool allowlist validation and recursive-tool removal.
+- Tool allowlist validation and removal of both delegation tools.
+- Worker-child suppression of delegation tool registration.
+- Immediate `herdr_worker` dispatch with returned tab/pane/attach commands and no result polling.
 - Unknown and malformed profiles.
 - Multiple sibling calls running concurrently.
 - Independent cancellation and shutdown cleanup for multiple children.
@@ -222,9 +251,10 @@ Add focused tests for:
 
 ## Acceptance criteria
 
-- The parent invokes a named profile and supplies only the complete task and optional working directory.
+- The parent invokes a named blocking profile, or the fixed fire-and-forget worker, and supplies only the complete task and optional working directory.
 - Profiles contain only `name`, `model`, `thinking`, and `tools` frontmatter.
-- Ordered model fallback works only for retryable provider failures.
+- Ordered model fallback works only for retryable provider failures in blocking subagent calls.
+- `herdr_worker` returns Herdr launch coordinates immediately and never polls for completion.
 - The parent can launch as many sibling calls as it chooses without an extension-wide serial queue.
 - Each child remains visible and inspectable in Herdr.
 - Typing `&` offers current profile names and inserts a literal `&name ` reference.

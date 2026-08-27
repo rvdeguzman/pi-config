@@ -107,6 +107,98 @@ test("aborted child results expose both error and stop reason", () => {
 	assert.match(text, /Error: Operation aborted/);
 });
 
+test("worker children do not register delegation tools", () => {
+	const previousWorkerChild = process.env.PI_HERDR_WORKER_CHILD;
+	process.env.PI_HERDR_WORKER_CHILD = "1";
+	const registered: string[] = [];
+	try {
+		herdrSubagentExtension({
+			registerTool: (definition: { name: string }) => registered.push(definition.name),
+		} as any);
+		assert.deepEqual(registered, []);
+	} finally {
+		if (previousWorkerChild === undefined) delete process.env.PI_HERDR_WORKER_CHILD;
+		else process.env.PI_HERDR_WORKER_CHILD = previousWorkerChild;
+	}
+});
+
+test("herdr_worker dispatches immediately without polling for a result", async () => {
+	const tools = new Map<string, any>();
+	const calls: string[][] = [];
+	let childCommand = "";
+	let runDir = "";
+	const previousWorkspace = process.env.HERDR_WORKSPACE_ID;
+	delete process.env.HERDR_WORKSPACE_ID;
+
+	const pi = {
+		on: () => undefined,
+		registerTool: (definition: any) => tools.set(definition.name, definition),
+		getThinkingLevel: () => "high",
+		getAllTools: () => ["read", "herdr_subagent", "herdr_worker"].map((name) => ({ name })),
+		getActiveTools: () => ["read", "herdr_subagent", "herdr_worker"],
+		exec: async (_command: string, args: string[]) => {
+			calls.push(args);
+			if (args[0] === "--version") return { code: 0, stdout: "herdr test", stderr: "", killed: false };
+			if (args[0] === "workspace" && args[1] === "create") {
+				return {
+					code: 0,
+					stdout: JSON.stringify({
+						result: {
+							workspace: { workspace_id: "w1" },
+							tab: { tab_id: "w1:t1" },
+							root_pane: { pane_id: "w1:p1" },
+						},
+					}),
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (args[0] === "pane" && args[1] === "run") {
+				childCommand = args[3] ?? "";
+				const sessionDir = childCommand.match(/'--session-dir' '([^']+)'/)?.[1];
+				assert.ok(sessionDir);
+				runDir = dirname(sessionDir);
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
+			throw new Error(`unexpected result-polling call: ${args.join(" ")}`);
+		},
+	} as any;
+
+	try {
+		herdrSubagentExtension(pi);
+		const result = await tools.get("herdr_worker").execute(
+			"worker-1",
+			{ task: "implement the focused fix" },
+			undefined,
+			undefined,
+			{
+				cwd: process.cwd(),
+				model: { provider: "openai-codex", id: "gpt-test" },
+				isProjectTrusted: () => true,
+				sessionManager: { getSessionId: () => `worker-${Date.now()}` },
+			},
+		);
+
+		assert.match(result.content[0].text, /Worker dispatched/);
+		assert.match(result.content[0].text, /herdr tab focus w1:t1/);
+		assert.equal(result.details.tabId, "w1:t1");
+		assert.equal(result.details.paneId, "w1:p1");
+		assert.match(childCommand, /PI_HERDR_WORKER_CHILD=1/);
+		assert.doesNotMatch(childCommand, /PI_HERDR_SUBAGENT_RESULT|result\.json/);
+		assert.match(childCommand, /'--tools' 'read'/);
+		assert.doesNotMatch(childCommand, /herdr_subagent|herdr_worker.*--tools/);
+		assert.deepEqual(
+			calls.map((args) => args.slice(0, 2)),
+			[["--version"], ["workspace", "create"], ["pane", "run"]],
+			"dispatch must return without pane, agent, or result-file polling",
+		);
+	} finally {
+		if (previousWorkspace === undefined) delete process.env.HERDR_WORKSPACE_ID;
+		else process.env.HERDR_WORKSPACE_ID = previousWorkspace;
+		if (runDir) await rm(dirname(runDir), { recursive: true, force: true });
+	}
+});
+
 test("a result arriving during exit grace wins over the exit sentinel", async () => {
 	let tool: any;
 	let childCommand = "";

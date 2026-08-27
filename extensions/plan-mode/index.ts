@@ -38,7 +38,14 @@ import {
 const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "ask_user_question"];
 const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write"];
 // Disable direct mutation plus tools that can delegate mutation or alter task state.
-const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["bash", "edit", "write", "todo", "herdr_subagent"]);
+const PLAN_MODE_DISABLED_TOOLS = new Set<string>([
+	"bash",
+	"edit",
+	"write",
+	"todo",
+	"herdr_subagent",
+	"herdr_worker",
+]);
 const PLAN_MANAGED_TOOLS = new Set<string>([...PLAN_MODE_TOOLS, ...NORMAL_MODE_TOOLS]);
 
 interface PlanModeState {
