@@ -122,6 +122,40 @@ test("worker children do not register delegation tools", () => {
 	}
 });
 
+test("worker references route only to the fire-and-forget tool", async () => {
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const tools = new Map<string, any>();
+	let execCalled = false;
+	const pi = {
+		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+		registerTool: (definition: any) => tools.set(definition.name, definition),
+		getThinkingLevel: () => "high",
+		exec: async () => {
+			execCalled = true;
+			throw new Error("unexpected process launch");
+		},
+	} as any;
+
+	herdrSubagentExtension(pi);
+	const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {});
+	assert.match(prompt.systemPrompt, /Route &worker through herdr_worker so it is fire-and-forget/);
+	assert.match(prompt.systemPrompt, /never pass worker to herdr_subagent/);
+
+	const subagent = tools.get("herdr_subagent");
+	const worker = tools.get("herdr_worker");
+	assert.ok(subagent);
+	assert.ok(worker);
+	assert.match(worker.promptGuidelines.join("\n"), /&worker reference through herdr_worker/);
+	assert.match(subagent.description, /Available blocking profiles:/);
+	assert.doesNotMatch(subagent.description, /Available blocking profiles:[^.]*worker/);
+	assert.match(subagent.promptGuidelines.join("\n"), /Never pass worker to herdr_subagent/);
+	await assert.rejects(
+		subagent.execute("blocking-worker", { agent: "WoRkEr", task: "implement it" }, undefined, undefined, {}),
+		/worker profile is reserved.*Call herdr_worker/s,
+	);
+	assert.equal(execCalled, false);
+});
+
 test("herdr_worker dispatches immediately without polling for a result", async () => {
 	const tools = new Map<string, any>();
 	const calls: string[][] = [];

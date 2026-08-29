@@ -695,10 +695,14 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event) => {
 		const profiles = await subagentProfiles.list();
 		if (profiles.length === 0) return;
+		const hasWorker = profiles.some((profile) => profile.name.toLowerCase() === WORKER_PROFILE);
+		const routing = hasWorker
+			? " Route &worker through herdr_worker so it is fire-and-forget; never pass worker to herdr_subagent. Route every other valid &name through herdr_subagent."
+			: " Route each valid &name through herdr_subagent.";
 		return {
 			systemPrompt:
 				event.systemPrompt +
-				"\n\nAgent profiles: A valid &name reference is the user's explicit request to delegate with that profile. Compose a complete, self-contained task for every child. Do not add model, thinking, or tool overrides; the profile owns them. The caller controls the number and ordering of calls unless the user explicitly requests references or parallelism.",
+				`\n\nAgent profiles: A valid &name reference is the user's explicit request to delegate with that profile.${routing} Compose a complete, self-contained task for every child. Do not add model, thinking, or tool overrides; the profile owns them. The caller controls the number and ordering of calls unless the user explicitly requests references or parallelism.`,
 		};
 	});
 
@@ -708,7 +712,10 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		await Promise.allSettled(tabs.map((tab) => pi.exec("herdr", ["tab", "close", tab], { timeout: 10_000 })));
 	});
 
-	const availableProfileNames = subagentProfiles.listSync().map((profile) => profile.name);
+	const availableProfileNames = subagentProfiles
+		.listSync()
+		.map((profile) => profile.name)
+		.filter((name) => name.toLowerCase() !== WORKER_PROFILE);
 
 	pi.registerTool({
 		name: "herdr_worker",
@@ -716,6 +723,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		description: "Dispatch one implementation task to the fixed worker profile in a separate Pi process. Fire-and-forget: returns the Herdr tab, pane, attach, capture, and cleanup commands immediately without waiting for or polling the result.",
 		promptSnippet: "Dispatch an implementation task to a fire-and-forget worker in Herdr",
 		promptGuidelines: [
+			"Route an explicit &worker reference through herdr_worker, never through herdr_subagent.",
 			"Use herdr_worker only for a self-contained implementation task that can continue independently after dispatch.",
 			"herdr_worker returns immediately and does not retrieve the worker result; use its attach or capture command to inspect the child.",
 		],
@@ -821,10 +829,11 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "herdr_subagent",
 		label: "Herdr Subagent",
-		description: `Run one delegated task in a separate pi process using a named agent profile. Available profiles: ${availableProfileNames.length ? availableProfileNames.join(", ") : "(none)"}. Profiles are refreshed at call time; sibling calls may run concurrently. Each child remains visible and inspectable in Herdr; output is capped at 50KB or 2000 lines.`,
-		promptSnippet: "Run one delegated task in an observable herdr pane",
+		description: `Run one blocking delegated task in a separate pi process using a named non-worker agent profile. Available blocking profiles: ${availableProfileNames.length ? availableProfileNames.join(", ") : "(none)"}. Use herdr_worker for the reserved worker profile and &worker references. Profiles are refreshed at call time; sibling calls may run concurrently. Each child remains visible and inspectable in Herdr; output is capped at 50KB or 2000 lines.`,
+		promptSnippet: "Run one blocking delegated task in an observable herdr pane",
 		promptGuidelines: [
-			"Use herdr_subagent once per delegated task and provide the selected agent profile plus a complete, self-contained task.",
+			"Use herdr_subagent once per delegated task and provide the selected non-worker agent profile plus a complete, self-contained task.",
+			"Never pass worker to herdr_subagent; route &worker and worker implementation dispatches through fire-and-forget herdr_worker.",
 			"If a run reports that the child is blocked, attach with the printed herdr command and answer it rather than retrying the task.",
 		],
 		parameters: Type.Object({
@@ -843,6 +852,11 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			if (!params.task.trim()) throw new Error("Subagent task must not be empty.");
+			if (params.agent.trim().toLowerCase() === WORKER_PROFILE) {
+				throw new Error(
+					'The worker profile is reserved for fire-and-forget dispatch. Call herdr_worker with the same task and cwd instead of herdr_subagent.',
+				);
+			}
 			const profile = await subagentProfiles.get(params.agent);
 			const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
 			const thinking = profile.thinking ?? pi.getThinkingLevel();
