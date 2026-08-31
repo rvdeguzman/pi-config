@@ -1,5 +1,5 @@
 /**
- * Provider quota status — pings Codex and Kimi usage endpoints and shows
+ * Provider quota status — pings the Codex usage endpoint and shows
  * e.g. "5h 8% wk 19%" in the footer.
  * Reads OAuth tokens pi already stores in ~/.pi/agent/auth.json.
  */
@@ -12,7 +12,7 @@ const REFRESH_MS = 5 * 60 * 1000;
 // File cache shared across pi instances so N open sessions don't each ping.
 const CACHE_PATH = join(homedir(), ".pi/agent/quota-cache.json");
 const CACHE_VERSION = 2;
-const TTL: Record<string, number> = { cx: 5 * 60 * 1000, k3: 5 * 60 * 1000 };
+const CACHE_TTL = 5 * 60 * 1000;
 
 export type Win = { label: string; pct: number; resetAt?: number };
 /**
@@ -67,7 +67,7 @@ async function cached(key: string, fetcher: () => Promise<Win[]>, force = false)
 	const cache = loadCache();
 	const e = cache[key];
 	const now = Date.now();
-	if (!force && e && ((e.version === CACHE_VERSION && now - e.at < TTL[key]) || (e.backoffUntil ?? 0) > now)) return e.wins;
+	if (!force && e && ((e.version === CACHE_VERSION && now - e.at < CACHE_TTL) || (e.backoffUntil ?? 0) > now)) return e.wins;
 	try {
 		const wins = await fetcher();
 		if (wins.length) cache[key] = { at: now, wins, version: CACHE_VERSION };
@@ -98,25 +98,6 @@ async function getJson(url: string, headers: Record<string, string>): Promise<an
 	});
 	if (res.status === 429) throw new Error("429");
 	return res.ok ? res.json() : undefined;
-}
-
-async function kimiWindows(): Promise<Win[]> {
-	const a = auth("kimi-coding");
-	if (!a) return [];
-	const u = await getJson("https://api.kimi.com/coding/v1/usages", {
-		Authorization: `Bearer ${a.access}`,
-		"User-Agent": "pi-quota",
-	});
-	const win = (label: string, d: any): Win | undefined => {
-		const limit = Number(d?.limit);
-		if (!limit) return undefined;
-		const used = d?.used != null ? Number(d.used) : d?.remaining != null ? limit - Number(d.remaining) : undefined;
-		if (used == null) return undefined;
-		return { label, pct: (used / limit) * 100, resetAt: d?.resetTime ? Date.parse(d.resetTime) : undefined };
-	};
-	// ponytail: 300min = 5h session window; falls back to first window if Kimi changes duration
-	const fiveH = u?.limits?.find((l: any) => l?.window?.duration === 300)?.detail ?? u?.limits?.[0]?.detail;
-	return [win("5h", fiveH), win("wk", u?.usage)].filter((w): w is Win => !!w);
 }
 
 function codexLabel(seconds?: number): string {
@@ -219,12 +200,7 @@ export default function (pi: ExtensionAPI) {
 		let provider: string | undefined;
 		if (!withLiveCtx(() => void (provider = ctx.model?.provider))) return;
 		lastFetch = Date.now();
-		const source =
-			provider === "openai-codex"
-				? () => cached("cx", codexWindows, reload)
-				: provider === "kimi-coding"
-					? () => cached("k3", kimiWindows, reload)
-					: undefined;
+		const source = provider === "openai-codex" ? () => cached("cx", codexWindows, reload) : undefined;
 		if (!source) {
 			lastWins = [];
 			withLiveCtx(() => {

@@ -64,7 +64,7 @@ model: openai-codex/gpt-5.6-sol
 ```yaml
 model:
   - openai-codex/gpt-5.6-sol
-  - anthropic/claude-opus-5
+  - openai-codex/gpt-5.6-luna
 ```
 
 Rules:
