@@ -1,6 +1,6 @@
 /**
- * herdr-subagent: run one delegated task in a child pi process living in a
- * real herdr pane, observable in the herdr UI while it works.
+ * herdr-subagent: run blocking, asynchronous, or fire-and-forget delegated
+ * tasks in child Pi processes living in real Herdr panes.
  *
  * Adapted from mitsuhiko/agent-stuff `extensions/subagent.ts` (tmux backend).
  * The tmux plumbing maps onto herdr as follows:
@@ -16,10 +16,11 @@
  * idle/working/blocked into the UI and this tool can tell you when a child is
  * stuck on a question instead of just looking slow.
  *
- * Since pi renders on the alternate screen, pane reads cannot recover scrolled
- * off output. The child therefore loads this same file as an extension in
- * "child mode" and writes its final answer to result.json, which the parent
- * polls. That file, not the pane text, is the source of truth.
+ * Since Pi renders on the alternate screen, pane reads cannot recover scrolled
+ * off output. Reported children therefore load this same file in "child mode"
+ * and write their final answer to result.json. Blocking calls poll that file
+ * inline; async calls monitor it in the background and steer the result into
+ * the parent session. The result file, not pane text, is the source of truth.
  */
 
 import { randomUUID } from "node:crypto";
@@ -55,7 +56,9 @@ const EXIT_ON_FINISH_ENV = "PI_HERDR_SUBAGENT_EXIT_ON_FINISH";
 const RUNS_DIR = "herdr-subagents";
 const WORKER_RUNS_DIR = "herdr-workers";
 const WORKER_PROFILE = "worker";
-const DELEGATION_TOOL_NAMES = new Set(["herdr_subagent", "herdr_worker"]);
+const ASYNC_RESULT_TYPE = "herdr-async-result";
+const ASYNC_WIDGET_ID = "herdr-async";
+const DELEGATION_TOOL_NAMES = new Set(["herdr_subagent", "herdr_worker", "herdr_async"]);
 const EXIT_SENTINEL_PREFIX = "__pi_herdr_subagent_exit__";
 const POLL_INTERVAL_MS = 500;
 /** Poll herdr's agent lifecycle state every N pane polls (it changes slowly). */
@@ -123,6 +126,13 @@ interface RunSpec {
 	model: string;
 	thinking: string;
 	trusted: boolean;
+}
+
+interface AsyncRunRecord {
+	id: string;
+	profile: string;
+	details: RunDetails;
+	controller: AbortController;
 }
 
 function shellQuote(value: string): string {
@@ -695,9 +705,44 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	}
 
 	const activeTabs = new Set<string>();
+	const asyncRuns = new Map<string, AsyncRunRecord>();
+	let shuttingDown = false;
+
+	const updateAsyncWidget = (ctx: ExtensionContext): void => {
+		if (!ctx.hasUI || shuttingDown) return;
+		if (asyncRuns.size === 0) {
+			ctx.ui.setWidget(ASYNC_WIDGET_ID, undefined);
+			return;
+		}
+		const lines = [`Async Herdr subagents (${asyncRuns.size})`];
+		for (const run of asyncRuns.values()) {
+			const status =
+				run.details.agentStatus === "blocked"
+					? "blocked · needs input"
+					: run.details.agentStatus ?? run.details.status;
+			lines.push(`  ${run.profile} · ${status} · ${run.details.attachCommand}`);
+		}
+		ctx.ui.setWidget(ASYNC_WIDGET_ID, lines);
+	};
+
+	const deliverAsyncResult = (run: AsyncRunRecord, details: RunDetails): void => {
+		if (shuttingDown || run.controller.signal.aborted) return;
+		const outcome = details.status === "completed" ? "completed" : "failed";
+		pi.sendMessage(
+			{
+				customType: ASYNC_RESULT_TYPE,
+				content: truncateToolText(`Async Herdr subagent "${run.profile}" ${outcome}.\n\n${resultText(details)}`),
+				display: true,
+				details: { runId: run.id, profile: run.profile, ...details },
+			},
+			{ deliverAs: "steer", triggerTurn: true },
+		);
+	};
 
 	pi.on("session_start", (_event, ctx) => {
+		shuttingDown = false;
 		ctx.ui.addAutocompleteProvider((current) => createAgentRefAutocomplete(current, subagentProfiles));
+		updateAsyncWidget(ctx);
 	});
 
 	pi.on("before_agent_start", async (event) => {
@@ -714,16 +759,18 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
+		shuttingDown = true;
+		for (const run of asyncRuns.values()) run.controller.abort();
+		asyncRuns.clear();
+		if (ctx.hasUI) ctx.ui.setWidget(ASYNC_WIDGET_ID, undefined);
 		const tabs = [...activeTabs];
 		activeTabs.clear();
 		await Promise.allSettled(tabs.map((tab) => pi.exec("herdr", ["tab", "close", tab], { timeout: 10_000 })));
 	});
 
-	const availableProfileNames = subagentProfiles
-		.listSync()
-		.map((profile) => profile.name)
-		.filter((name) => name.toLowerCase() !== WORKER_PROFILE);
+	const allProfileNames = subagentProfiles.listSync().map((profile) => profile.name);
+	const availableProfileNames = allProfileNames.filter((name) => name.toLowerCase() !== WORKER_PROFILE);
 
 	pi.registerTool({
 		name: "herdr_worker",
@@ -831,6 +878,292 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 					thinking,
 				},
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "herdr_async",
+		label: "Herdr Async",
+		description: `Dispatch one asynchronous delegated task using a named agent profile. Available profiles: ${allProfileNames.length ? allProfileNames.join(", ") : "(none)"}. Returns Herdr coordinates immediately, monitors the child in the background, and automatically steers its bounded final result back into this session. The first configured model candidate is used. Async runs are session-scoped and are cancelled when the parent session shuts down.`,
+		promptSnippet: "Dispatch a background Herdr subagent whose result returns automatically",
+		promptGuidelines: [
+			"Use herdr_async when delegated work can run independently while the parent continues useful work.",
+			"Provide herdr_async a named agent profile and a complete, self-contained task.",
+			"Do not poll a herdr_async run; its completion or failure is automatically steered into the parent session.",
+		],
+		parameters: Type.Object({
+			agent: Type.String({
+				description: "Named profile from ~/.pi/agent/agents/*.md",
+			}),
+			task: Type.String({
+				description: "The complete task for the asynchronous child Pi process",
+			}),
+			cwd: Type.Optional(
+				Type.String({
+					description: "Working directory. Defaults to the current project.",
+				}),
+			),
+		}),
+
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if (!params.task.trim()) throw new Error("Async subagent task must not be empty.");
+			if (signal?.aborted) throw new Error("Async subagent dispatch aborted.");
+
+			const profile = await subagentProfiles.get(params.agent);
+			const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
+			const thinking = profile.thinking ?? pi.getThinkingLevel();
+			const modelRefs =
+				profile.model === undefined ? [undefined] : Array.isArray(profile.model) ? profile.model : [profile.model];
+			const selectedModel = resolveModel(ctx, undefined, modelRefs[0]);
+			const childTools = resolveChildTools(pi, profile.tools ?? pi.getActiveTools(), profile.name);
+			await validateCwd(cwd);
+
+			const version = await pi.exec("herdr", ["--version"], { timeout: 5_000 });
+			if (version.code !== 0) {
+				throw new Error(`herdr is required for async subagents: ${version.stderr.trim() || "herdr not found"}`);
+			}
+
+			const childSessionId = randomUUID();
+			const exitSentinel = exitSentinelFor(childSessionId);
+			const runDir = path.join(getAgentDir(), RUNS_DIR, ctx.sessionManager.getSessionId(), childSessionId);
+			const resultPath = path.join(runDir, "result.json");
+			const promptPath = path.join(runDir, "task.md");
+			const sessionDir = path.join(runDir, "session");
+			await mkdir(sessionDir, { recursive: true, mode: 0o700 });
+			await writeFile(promptPath, `# Asynchronous delegated task\n\n${params.task}\n`, {
+				encoding: "utf8",
+				mode: 0o600,
+			});
+
+			const spec: RunSpec = {
+				task: params.task,
+				cwd,
+				workspaceId: "",
+				tabId: "",
+				paneId: "",
+				agentName: agentNameFor(childSessionId, "async"),
+				attachCommand: "",
+				captureCommand: "",
+				killCommand: "",
+				provider: selectedModel.provider,
+				model: selectedModel.model,
+				thinking,
+				trusted: isSameOrDescendant(path.resolve(ctx.cwd), cwd) && ctx.isProjectTrusted(),
+			};
+			const piArgs = [
+				...getPiInvocationParts(),
+				"--provider",
+				selectedModel.provider,
+				"--model",
+				selectedModel.model,
+				"--thinking",
+				thinking,
+				...(childTools.length > 0 ? ["--tools", childTools.join(",")] : ["--no-tools"]),
+				"--session-dir",
+				sessionDir,
+				"--name",
+				spec.agentName,
+				spec.trusted ? "--approve" : "--no-approve",
+				"--extension",
+				EXTENSION_PATH,
+				`@${promptPath}`,
+			];
+			const childCommand = [
+				"env",
+				`${CHILD_ENV}=1`,
+				`${RESULT_ENV}=${shellQuote(resultPath)}`,
+				`${EXIT_ON_FINISH_ENV}=1`,
+				piArgs.map(shellQuote).join(" "),
+				`; printf '\\n${exitSentinel} %s\\n' "$?"`,
+			].join(" ");
+
+			const startedAt = Date.now();
+			const created = await createChildPane(pi, cwd, tabLabelFor(params.task, "async"));
+			spec.workspaceId = created.workspaceId;
+			spec.tabId = created.tabId;
+			spec.paneId = created.paneId;
+			spec.attachCommand = `herdr tab focus ${created.tabId}`;
+			spec.captureCommand = `herdr pane read ${created.paneId} --source recent-unwrapped --lines ${CAPTURE_LINES}`;
+			spec.killCommand = `herdr tab close ${created.tabId}`;
+			activeTabs.add(created.tabId);
+			let tabClosed = false;
+			const closeChildTab = async (): Promise<boolean> => {
+				if (tabClosed) return true;
+				try {
+					await herdrOk(pi, ["tab", "close", created.tabId], { timeout: 10_000 });
+					tabClosed = true;
+					activeTabs.delete(created.tabId);
+					return true;
+				} catch (error) {
+					if (error instanceof HerdrError && error.code === "tab_not_found") {
+						tabClosed = true;
+						activeTabs.delete(created.tabId);
+						return true;
+					}
+					return false;
+				}
+			};
+
+			try {
+				await herdrOk(pi, ["pane", "run", created.paneId, childCommand]);
+			} catch (error) {
+				await closeChildTab();
+				throw error;
+			}
+
+			const controller = new AbortController();
+			const run: AsyncRunRecord = {
+				id: childSessionId,
+				profile: profile.name,
+				details: detailsFor(spec, "running", { startedAt }),
+				controller,
+			};
+			asyncRuns.set(run.id, run);
+			updateAsyncWidget(ctx);
+
+			const monitor = async (): Promise<void> => {
+				let lastPane = "";
+				let lastAgentStatus: AgentStatus | undefined;
+				let herdrSessionFile: string | undefined;
+				let renamed = false;
+				let exitSeenAt: number | undefined;
+				let childResult: ChildResult | undefined;
+				let finalDetails: RunDetails | undefined;
+				let tick = 0;
+
+				try {
+					while (!childResult) {
+						if (controller.signal.aborted || shuttingDown) return;
+						try {
+							childResult = JSON.parse(await readFile(resultPath, "utf8")) as ChildResult;
+							break;
+						} catch {
+							// The child publishes its result atomically after settling.
+						}
+
+						const paneText = await herdrPaneRead(pi, created.paneId, PANE_READ_LINES);
+						const agentInfo = tick++ % AGENT_STATUS_EVERY === 0 ? await readAgentInfo(pi, created.paneId) : undefined;
+						if (agentInfo?.sessionFile) herdrSessionFile = agentInfo.sessionFile;
+						if (agentInfo && !renamed) {
+							renamed = true;
+							await pi
+								.exec("herdr", ["agent", "rename", created.paneId, spec.agentName], { timeout: 10_000 })
+								.catch(() => undefined);
+						}
+
+						const pane = paneText === undefined ? "" : trimPane(paneText);
+						const statusChanged = agentInfo !== undefined && agentInfo.status !== lastAgentStatus;
+						if ((pane && pane !== lastPane) || statusChanged) {
+							lastPane = pane || lastPane;
+							if (agentInfo) lastAgentStatus = agentInfo.status;
+							run.details = detailsFor(spec, "running", {
+								pane: lastPane,
+								agentStatus: lastAgentStatus,
+								startedAt,
+							});
+							updateAsyncWidget(ctx);
+						}
+
+						const exitCode = paneText === undefined ? undefined : parseChildExitCode(paneText, exitSentinel);
+						const paneGone = paneText === undefined && !(await paneExists(pi, created.paneId));
+						if (exitCode !== undefined || paneGone) {
+							exitSeenAt ??= Date.now();
+							if (Date.now() - exitSeenAt >= EXIT_GRACE_MS) {
+								try {
+									childResult = JSON.parse(await readFile(resultPath, "utf8")) as ChildResult;
+									break;
+								} catch {
+									throw new Error(
+										`Async child Pi exited before reporting a result. Inspect: ${spec.captureCommand}`,
+									);
+								}
+							}
+						}
+
+						await abortableDelay(POLL_INTERVAL_MS, controller.signal);
+					}
+
+					if (!childResult || controller.signal.aborted || shuttingDown) return;
+					const finalPaneText = await herdrPaneRead(pi, created.paneId, PANE_READ_LINES);
+					const finalPane = finalPaneText === undefined ? lastPane : trimPane(finalPaneText);
+					finalDetails = detailsFor(spec, childResult.status === "completed" ? "completed" : "failed", {
+						pane: finalPane,
+						output: truncateToolText(childResult.output.trim() || "(no text output)"),
+						error: childResult.error?.trim() || undefined,
+						stopReason: childResult.stopReason,
+						agentStatus: lastAgentStatus,
+						sessionFile: childResult.sessionFile ?? herdrSessionFile,
+						provider: childResult.provider ?? spec.provider,
+						model: childResult.model ?? spec.model,
+						thinking: childResult.thinking ?? spec.thinking,
+						startedAt,
+						finishedAt: childResult.finishedAt,
+					});
+				} catch (error) {
+					if (controller.signal.aborted || shuttingDown) return;
+					finalDetails = detailsFor(spec, "failed", {
+						pane: lastPane,
+						error: error instanceof Error ? error.message : String(error),
+						agentStatus: lastAgentStatus,
+						sessionFile: herdrSessionFile,
+						startedAt,
+						finishedAt: Date.now(),
+					});
+				}
+
+				if (!finalDetails || controller.signal.aborted || shuttingDown) return;
+				finalDetails.autoClosed = await closeChildTab();
+				run.details = finalDetails;
+				updateAsyncWidget(ctx);
+				deliverAsyncResult(run, finalDetails);
+			};
+
+			void monitor()
+				.catch((error) => {
+					if (!shuttingDown) {
+						console.error(`[herdr-async] Monitor failed: ${error instanceof Error ? error.message : String(error)}`);
+					}
+				})
+				.finally(() => {
+					asyncRuns.delete(run.id);
+					updateAsyncWidget(ctx);
+				});
+
+			const text = [
+				`Async ${profile.name} dispatched in Herdr tab ${created.tabId}, pane ${created.paneId}.`,
+				"Its completion or failure will be delivered automatically; do not poll it.",
+				`Attach: ${spec.attachCommand}`,
+				`Capture: ${spec.captureCommand}`,
+				`Clean up: ${spec.killCommand}`,
+			].join("\n");
+			return {
+				content: [{ type: "text", text }],
+				details: { runId: run.id, profile: profile.name, ...run.details },
+			};
+		},
+
+		renderCall(args, theme) {
+			const task = args.task?.trim() || "...";
+			const firstLine = task.split("\n", 1)[0] ?? task;
+			const preview = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
+			return new Text(
+				theme.fg("toolTitle", theme.bold(`herdr async ${args.agent || "subagent"} `)) + theme.fg("dim", preview),
+				0,
+				0,
+			);
+		},
+
+		renderResult(result, _options, theme) {
+			const details = result.details as (RunDetails & { profile?: string }) | undefined;
+			if (!details?.attachCommand) {
+				const content = result.content.find((part) => part.type === "text");
+				return new Text(content?.type === "text" ? content.text : "(no output)", 0, 0);
+			}
+			return new Text(
+				`${theme.fg("success", "↗")} ${theme.fg("toolTitle", theme.bold(details.profile || details.agentName))}${theme.fg("muted", " · running asynchronously")}\n  ${theme.fg("accent", details.attachCommand)}`,
+				0,
+				0,
+			);
 		},
 	});
 

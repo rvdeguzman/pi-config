@@ -17,6 +17,14 @@ function execPi(result: { code: number; stdout?: string; stderr?: string }) {
 	} as any;
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() >= deadline) throw new Error("Timed out waiting for condition.");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
 test("herdrOk accepts exit 0 with empty stdout", async () => {
 	await herdrOk(execPi({ code: 0 }), ["pane", "run", "w1:p1", "printf ok"]);
 });
@@ -238,6 +246,141 @@ test("herdr_worker dispatches immediately without polling for a result", async (
 		if (previousWorkspace === undefined) delete process.env.HERDR_WORKSPACE_ID;
 		else process.env.HERDR_WORKSPACE_ID = previousWorkspace;
 		if (runDir) await rm(dirname(runDir), { recursive: true, force: true });
+	}
+});
+
+test("herdr_async returns immediately and steers eventual completion or failure into the parent", async () => {
+	const tools = new Map<string, any>();
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const messages: Array<{ message: any; options: any }> = [];
+	const closedTabs: string[] = [];
+	const resultPaths: string[] = [];
+	let childCommand = "";
+	let paneReads = 0;
+	let nextChildResult: Record<string, unknown> = {
+		version: 1,
+		status: "completed",
+		output: "async answer",
+		provider: "openai-codex",
+		model: "gpt-test",
+		thinking: "high",
+	};
+	const previousWorkspace = process.env.HERDR_WORKSPACE_ID;
+	delete process.env.HERDR_WORKSPACE_ID;
+
+	const pi = {
+		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+		registerTool: (definition: any) => tools.set(definition.name, definition),
+		getThinkingLevel: () => "high",
+		getAllTools: () => ["read", "herdr_subagent", "herdr_worker", "herdr_async"].map((name) => ({ name })),
+		getActiveTools: () => ["read", "herdr_subagent", "herdr_worker", "herdr_async"],
+		sendMessage: (message: any, options: any) => messages.push({ message, options }),
+		exec: async (_command: string, args: string[]) => {
+			if (args[0] === "--version") return { code: 0, stdout: "herdr test", stderr: "", killed: false };
+			if (args[0] === "workspace" && args[1] === "create") {
+				return {
+					code: 0,
+					stdout: JSON.stringify({
+						result: {
+							workspace: { workspace_id: "w1" },
+							tab: { tab_id: "w1:t1" },
+							root_pane: { pane_id: "w1:p1" },
+						},
+					}),
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (args[0] === "pane" && args[1] === "run") {
+				childCommand = args[3] ?? "";
+				const resultPath = childCommand.match(/PI_HERDR_SUBAGENT_RESULT='([^']+)'/)?.[1] ?? "";
+				assert.ok(resultPath);
+				resultPaths.push(resultPath);
+				const childResult = { ...nextChildResult };
+				setTimeout(async () => {
+					await writeFile(resultPath, JSON.stringify({ ...childResult, finishedAt: Date.now() }));
+				}, 80);
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
+			if (args[0] === "pane" && args[1] === "read") {
+				paneReads++;
+				return { code: 0, stdout: "child running", stderr: "", killed: false };
+			}
+			if (args[0] === "agent" && args[1] === "get") {
+				return { code: 1, stdout: "", stderr: "no agent", killed: false };
+			}
+			if (args[0] === "tab" && args[1] === "close") {
+				closedTabs.push(args[2] ?? "");
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
+			throw new Error(`unexpected herdr args: ${args.join(" ")}`);
+		},
+	} as any;
+
+	try {
+		herdrSubagentExtension(pi);
+		const result = await tools.get("herdr_async").execute(
+			"async-1",
+			{ agent: "worker", task: "finish in the background" },
+			undefined,
+			undefined,
+			{
+				cwd: process.cwd(),
+				hasUI: false,
+				model: { provider: "openai-codex", id: "gpt-test" },
+				isProjectTrusted: () => true,
+				sessionManager: { getSessionId: () => `async-${Date.now()}` },
+			},
+		);
+
+		assert.match(result.content[0].text, /delivered automatically; do not poll/i);
+		assert.equal(result.details.status, "running");
+		assert.equal(result.details.profile, "worker");
+		assert.equal(messages.length, 0, "dispatch should return before completion delivery");
+		assert.match(childCommand, /PI_HERDR_SUBAGENT_CHILD=1/);
+		assert.match(childCommand, /PI_HERDR_SUBAGENT_EXIT_ON_FINISH=1/);
+		assert.match(childCommand, /'--tools' 'read'/);
+		assert.doesNotMatch(childCommand.match(/'--tools' '[^']*'/)?.[0] ?? "", /herdr_(?:subagent|worker|async)/);
+
+		await waitFor(() => messages.length === 1);
+		assert.ok(paneReads > 0);
+		assert.deepEqual(closedTabs, ["w1:t1"]);
+		assert.equal(messages[0].message.customType, "herdr-async-result");
+		assert.match(messages[0].message.content, /Async Herdr subagent "worker" completed/);
+		assert.match(messages[0].message.content, /async answer/);
+		assert.deepEqual(messages[0].options, { deliverAs: "steer", triggerTurn: true });
+
+		nextChildResult = {
+			version: 1,
+			status: "failed",
+			output: "partial async output",
+			error: "child task failed",
+		};
+		const failedDispatch = await tools.get("herdr_async").execute(
+			"async-2",
+			{ agent: "worker", task: "fail in the background" },
+			undefined,
+			undefined,
+			{
+				cwd: process.cwd(),
+				hasUI: false,
+				model: { provider: "openai-codex", id: "gpt-test" },
+				isProjectTrusted: () => true,
+				sessionManager: { getSessionId: () => `async-failure-${Date.now()}` },
+			},
+		);
+		assert.equal(failedDispatch.details.status, "running");
+		assert.equal(messages.length, 1, "failure must also arrive asynchronously");
+		await waitFor(() => messages.length === 2);
+		assert.match(messages[1].message.content, /Async Herdr subagent "worker" failed/);
+		assert.match(messages[1].message.content, /child task failed/);
+		assert.match(messages[1].message.content, /partial async output/);
+		assert.deepEqual(closedTabs, ["w1:t1", "w1:t1"]);
+	} finally {
+		await handlers.get("session_shutdown")?.({}, { hasUI: false });
+		if (previousWorkspace === undefined) delete process.env.HERDR_WORKSPACE_ID;
+		else process.env.HERDR_WORKSPACE_ID = previousWorkspace;
+		await Promise.all(resultPaths.map((resultPath) => rm(dirname(resultPath), { recursive: true, force: true })));
 	}
 });
 

@@ -6,16 +6,18 @@ Approved design specification. This replaces the previous asynchronous RPC/fleet
 
 ## Goal
 
-Keep the observable Herdr-backed subagent runner, with child runtime configuration in small named agent profiles, and provide a second fire-and-forget path for implementation workers.
+Keep the observable Herdr-backed subagent runner, with child runtime configuration in small named agent profiles, and provide both blocking and asynchronous execution paths.
 
 The responsibility split is:
 
-- The caller/parent chooses the agent profile for a blocking `herdr_subagent` call.
+- The caller/parent chooses the agent profile for a blocking `herdr_subagent` or asynchronous `herdr_async` call.
 - `herdr_worker` always uses the `worker` profile.
 - The caller/parent writes the complete delegated task.
 - The agent profile selects the model, thinking level, and tools.
 - The caller/parent decides how many children to launch and whether those calls are parallel or sequential.
-- `herdr_subagent` waits for a result; `herdr_worker` returns launch coordinates immediately and never polls for completion.
+- `herdr_subagent` waits for a result.
+- `herdr_async` returns launch coordinates immediately, monitors in the background, and steers the final result back automatically.
+- `herdr_worker` returns launch coordinates immediately and never polls for completion.
 
 There is no workflow engine and no profile-level concurrency policy.
 
@@ -99,6 +101,18 @@ herdr_subagent({
 })
 ```
 
+The asynchronous tool has the same profile/task shape, returns immediately, and later delivers a custom steer message with the bounded result:
+
+```ts
+herdr_async({
+  agent: string;
+  task: string;
+  cwd?: string;
+})
+```
+
+Async runs are session-scoped: parent session shutdown aborts their monitors and closes their tabs. They currently use the first configured model candidate rather than ordered fallback.
+
 The fire-and-forget worker tool is also one-child-per-call, but fixes profile selection to `worker`:
 
 ```ts
@@ -110,7 +124,7 @@ herdr_worker({
 
 `herdr_worker` returns the created workspace, tab, and pane IDs plus attach, capture, and cleanup commands as soon as `herdr pane run` accepts the launch. It does not create or poll a result file, read pane output, query agent state, retry another model, or deliver a later completion result.
 
-Neither tool accepts model, thinking, tools, parallel count, chain, or workflow parameters. Those concerns belong to the selected/fixed profile or the caller.
+None of the tools accepts model, thinking, tools, parallel count, chain, or workflow parameters. Those concerns belong to the selected/fixed profile or the caller.
 
 Example:
 
@@ -128,7 +142,8 @@ The extension exposes the available profile names in the tool description so the
 The caller controls concurrency by issuing the desired number of ordinary `herdr_subagent` or `herdr_worker` calls.
 
 - Sibling calls emitted by the parent may execute concurrently through Pi's normal parallel tool execution.
-- Sequential subagent calls remain sequential when the parent waits for one result before issuing the next.
+- Sequential blocking subagent calls remain sequential when the parent waits for one result before issuing the next.
+- Async calls return immediately and independently steer each final result into the parent session.
 - Worker calls return immediately after dispatch, so later parent work does not depend on worker completion unless the parent or user explicitly inspects the returned Herdr pane.
 - Profiles do not contain `max_parallel` or any equivalent field.
 - The current extension-wide serial queue must be removed.
@@ -196,6 +211,14 @@ For `herdr_subagent`:
 7. Use Herdr pane and agent state for progress, blocked state, attachment, and inspection.
 8. Return the bounded result and child-session information, then auto-close the completed Herdr tab. While the child is running, progress updates include attach and capture commands.
 
+For `herdr_async`:
+
+1. Resolve the named profile and its first model candidate, thinking level, and tool allowlist.
+2. Launch a reported child in a background Herdr tab and return its coordinates immediately.
+3. Track active runs in a parent widget while a detached session-scoped monitor polls `result.json` and Herdr state.
+4. Auto-close the tab after completion or failure.
+5. Inject a visible `herdr-async-result` custom message with `deliverAs: "steer"` and `triggerTurn: true`.
+
 For `herdr_worker`:
 
 1. Resolve the fixed `worker` profile and its first model candidate, thinking level, and tool allowlist.
@@ -212,7 +235,7 @@ Blocking children remain visible and attachable while running, then shut down an
 - A child outside that tree starts without project approval.
 - Blocking child mode registers only its result reporter and does not register delegation tools.
 - Worker child mode registers neither `herdr_subagent` nor `herdr_worker` and performs no result reporting.
-- Both delegation tool names are excluded from all child `--tools` allowlists.
+- All three delegation tool names (`herdr_subagent`, `herdr_async`, and `herdr_worker`) are excluded from all child `--tools` allowlists.
 - Profile file contents are configuration; Markdown bodies are ignored.
 - Shell commands must continue to use argument-safe construction and private run files.
 - Returned output remains capped at Pi's standard 50 KB / 2,000-line tool limit; the complete child session stays on disk.
@@ -240,6 +263,8 @@ Add focused tests for:
 - Tool allowlist validation and removal of both delegation tools.
 - Worker-child suppression of delegation tool registration.
 - Immediate `herdr_worker` dispatch with returned tab/pane/attach commands and no result polling.
+- Immediate `herdr_async` dispatch followed by one automatic steer delivery when its result appears.
+- Async failure delivery, tab cleanup, tool stripping, and parent-shutdown cancellation.
 - Unknown and malformed profiles.
 - Multiple sibling calls running concurrently.
 - Independent cancellation and shutdown cleanup for multiple children.
@@ -251,12 +276,13 @@ Add focused tests for:
 
 ## Acceptance criteria
 
-- The parent invokes a named blocking profile, or the fixed fire-and-forget worker, and supplies only the complete task and optional working directory.
+- The parent invokes a named blocking or asynchronous profile, or the fixed fire-and-forget worker, and supplies only the complete task and optional working directory.
 - Profiles contain only `name`, `model`, `thinking`, and `tools` frontmatter.
 - Ordered model fallback works only for retryable provider failures in blocking subagent calls.
 - `herdr_worker` returns Herdr launch coordinates immediately and never polls for completion.
 - The parent can launch as many sibling calls as it chooses without an extension-wide serial queue.
-- Each child remains visible and inspectable in Herdr while running; completed blocking tabs auto-close, while worker tabs remain open.
+- Each child remains visible and inspectable in Herdr while running; completed blocking and async tabs auto-close, while worker tabs remain open.
+- Async completion and failure are delivered exactly once as steer messages without polling by the model.
 - Typing `&` offers current profile names and inserts a literal `&name ` reference.
 - A valid reference tells the parent which profile to use while leaving task composition to the parent.
 - No workflow, chain, automatic role prompt, profile concurrency, or nested-subagent system is introduced.
