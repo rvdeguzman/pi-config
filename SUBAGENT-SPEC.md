@@ -194,7 +194,7 @@ For `herdr_subagent`:
 5. Launch a separate Pi process with the resolved configuration and isolated session directory.
 6. Poll the atomic `result.json` as the authoritative completion result.
 7. Use Herdr pane and agent state for progress, blocked state, attachment, and inspection.
-8. Return the bounded result with attach, capture, cleanup, and child-session information.
+8. Return the bounded result and child-session information, then auto-close the completed Herdr tab. While the child is running, progress updates include attach and capture commands.
 
 For `herdr_worker`:
 
@@ -204,7 +204,7 @@ For `herdr_worker`:
 4. Return the workspace/tab/pane IDs and attach, capture, and cleanup commands immediately after successful dispatch.
 5. Perform no completion, pane-output, agent-state, sentinel, or result-file polling.
 
-Completed children and their Pi sessions remain alive for inspection and continued conversation until explicitly closed. A blocking subagent fallback attempt belongs to the same logical tool call and must not produce multiple successful results. Fire-and-forget workers do not attempt model fallback because the parent does not observe completion.
+Blocking children remain visible and attachable while running, then shut down and auto-close after the parent collects their result. Set `PI_HERDR_SUBAGENT_EXIT_ON_FINISH=0` on the parent to retain completed blocking tabs for inspection. Fire-and-forget workers remain alive until explicitly closed. A blocking subagent fallback attempt belongs to the same logical tool call and must not produce multiple successful results. Fire-and-forget workers do not attempt model fallback because the parent does not observe completion.
 
 ## Trust and isolation
 
@@ -256,7 +256,7 @@ Add focused tests for:
 - Ordered model fallback works only for retryable provider failures in blocking subagent calls.
 - `herdr_worker` returns Herdr launch coordinates immediately and never polls for completion.
 - The parent can launch as many sibling calls as it chooses without an extension-wide serial queue.
-- Each child remains visible and inspectable in Herdr.
+- Each child remains visible and inspectable in Herdr while running; completed blocking tabs auto-close, while worker tabs remain open.
 - Typing `&` offers current profile names and inserts a literal `&name ` reference.
 - A valid reference tells the parent which profile to use while leaving task composition to the parent.
 - No workflow, chain, automatic role prompt, profile concurrency, or nested-subagent system is introduced.

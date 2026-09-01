@@ -46,10 +46,10 @@ const CHILD_ENV = "PI_HERDR_SUBAGENT_CHILD";
 const WORKER_CHILD_ENV = "PI_HERDR_WORKER_CHILD";
 const RESULT_ENV = "PI_HERDR_SUBAGENT_RESULT";
 /**
- * Set to 1 to make the child pi shut down as soon as it reports its result.
- * Default (0) leaves the child running in its pane so you can attach and keep
- * talking to it; the parent tool call still returns as soon as result.json
- * lands, and `herdr tab close <tab>` is the cleanup.
+ * Set to 0 to retain completed blocking subagent tabs for inspection.
+ * Blocking subagents otherwise shut down and their Herdr tabs auto-close as
+ * soon as the parent has collected result.json. Fire-and-forget workers are
+ * unaffected and remain open until explicitly closed.
  */
 const EXIT_ON_FINISH_ENV = "PI_HERDR_SUBAGENT_EXIT_ON_FINISH";
 const RUNS_DIR = "herdr-subagents";
@@ -106,6 +106,7 @@ interface RunDetails {
 	sessionFile?: string;
 	startedAt?: number;
 	finishedAt?: number;
+	autoClosed?: boolean;
 }
 
 interface RunSpec {
@@ -391,8 +392,8 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string): void {
 		) => void
 	)("agent_settled", async (_event, ctx) => {
 		await report(ctx);
-		// Opt-in: by default the child stays alive in its pane after reporting so
-		// the run can be inspected and continued interactively.
+		// The parent closes the Herdr tab after collecting the result. Shutting Pi
+		// down first gives its session lifecycle a chance to flush cleanly.
 		if (process.env[EXIT_ON_FINISH_ENV] === "1") ctx.shutdown();
 	});
 
@@ -495,6 +496,7 @@ export function isRunDetails(value: unknown): value is RunDetails {
 	) {
 		return false;
 	}
+	if (details.autoClosed !== undefined && typeof details.autoClosed !== "boolean") return false;
 	return [details.startedAt, details.finishedAt].every(
 		(value) => value === undefined || (typeof value === "number" && Number.isFinite(value)),
 	);
@@ -531,11 +533,17 @@ export function resultText(details: RunDetails): string {
 	if (details.stopReason) lines.push(`Stop reason: ${details.stopReason}`);
 	if (details.error) lines.push(`Error: ${details.error}`);
 	lines.push(
-		`herdr: pane ${details.paneId}, tab ${details.tabId}, agent ${details.agentName}`,
-		`Attach: ${details.attachCommand}`,
-		`Capture: ${details.captureCommand}`,
-		`Clean up: ${details.killCommand}`,
+		details.autoClosed
+			? `herdr: pane ${details.paneId}, tab ${details.tabId} (auto-closed)`
+			: `herdr: pane ${details.paneId}, tab ${details.tabId}, agent ${details.agentName}`,
 	);
+	if (!details.autoClosed) {
+		lines.push(
+			`Attach: ${details.attachCommand}`,
+			`Capture: ${details.captureCommand}`,
+			`Clean up: ${details.killCommand}`,
+		);
+	}
 	if (details.sessionFile) lines.push(`Child session: ${details.sessionFile}`);
 	if (details.output) lines.push("", details.output);
 	return truncateToolText(lines.join("\n"));
@@ -829,7 +837,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "herdr_subagent",
 		label: "Herdr Subagent",
-		description: `Run one blocking delegated task in a separate pi process using a named non-worker agent profile. Available blocking profiles: ${availableProfileNames.length ? availableProfileNames.join(", ") : "(none)"}. Use herdr_worker for the reserved worker profile and &worker references. Profiles are refreshed at call time; sibling calls may run concurrently. Each child remains visible and inspectable in Herdr; output is capped at 50KB or 2000 lines.`,
+		description: `Run one blocking delegated task in a separate pi process using a named non-worker agent profile. Available blocking profiles: ${availableProfileNames.length ? availableProfileNames.join(", ") : "(none)"}. Use herdr_worker for the reserved worker profile and &worker references. Profiles are refreshed at call time; sibling calls may run concurrently. Each child is visible and inspectable in Herdr while running, then its tab auto-closes after the result is collected; output is capped at 50KB or 2000 lines.`,
 		promptSnippet: "Run one blocking delegated task in an observable herdr pane",
 		promptGuidelines: [
 			"Use herdr_subagent once per delegated task and provide the selected non-worker agent profile plus a complete, self-contained task.",
@@ -858,6 +866,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 				);
 			}
 			const profile = await subagentProfiles.get(params.agent);
+			const autoClose = process.env[EXIT_ON_FINISH_ENV] !== "0";
 			const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
 			const thinking = profile.thinking ?? pi.getThinkingLevel();
 			const modelRefs =
@@ -917,17 +926,15 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 					EXTENSION_PATH,
 					`@${promptPath}`,
 				];
-				// No `exec`: the pane's shell must outlive pi, otherwise herdr
-				// closes the pane (and its tab) the moment the child exits and the
-				// transcript is gone. The sentinel tells the poll loop that pi
-				// exited even though the pane is still alive. With the default
-				// (no exit on finish) the child never exits on its own, so the
-				// sentinel only fires on crashes or manual quits.
+				// No `exec`: the pane's shell stays available long enough for the
+				// parent to collect the result and explicitly close the Herdr tab.
+				// The sentinel still tells the poll loop when Pi exits before a
+				// usable result file appears.
 				const childCommand = [
 					"env",
 					`${CHILD_ENV}=1`,
 					`${RESULT_ENV}=${shellQuote(resultPath)}`,
-					`${EXIT_ON_FINISH_ENV}=${process.env[EXIT_ON_FINISH_ENV] === "1" ? "1" : "0"}`,
+					`${EXIT_ON_FINISH_ENV}=${autoClose ? "1" : "0"}`,
 					piArgs.map(shellQuote).join(" "),
 					`; printf '\\n${exitSentinel} %s\\n' "$?"`,
 				].join(" ");
@@ -941,6 +948,23 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 				spec.captureCommand = `herdr pane read ${created.paneId} --source recent-unwrapped --lines ${CAPTURE_LINES}`;
 				spec.killCommand = `herdr tab close ${created.tabId}`;
 				activeTabs.add(created.tabId);
+				let tabClosed = false;
+				const closeChildTab = async (): Promise<boolean> => {
+					if (tabClosed) return true;
+					try {
+						await herdrOk(pi, ["tab", "close", created.tabId], { timeout: 10_000 });
+						tabClosed = true;
+						activeTabs.delete(created.tabId);
+						return true;
+					} catch (error) {
+						if (error instanceof HerdrError && error.code === "tab_not_found") {
+							tabClosed = true;
+							activeTabs.delete(created.tabId);
+							return true;
+						}
+						return false;
+					}
+				};
 
 				try {
 					const initialDetails = detailsFor(spec, "running", { startedAt });
@@ -1037,17 +1061,12 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						finishedAt: childResult.finishedAt,
 					});
 
-					// The child settled: hand its tab over to the user instead of
-					// closing it on session shutdown.
-					activeTabs.delete(created.tabId);
+					if (autoClose) details.autoClosed = await closeChildTab();
+					else activeTabs.delete(created.tabId); // Hand the settled tab over to the user.
 
 					if (childResult.status === "failed") {
 						if (isRetryableProviderFailure(childResult) && candidateIndex + 1 < modelRefs.length && !signal?.aborted) {
-							await pi
-								.exec("herdr", ["tab", "close", created.tabId], {
-									timeout: 10_000,
-								})
-								.catch(() => undefined);
+							await closeChildTab();
 							continue;
 						}
 						throw new NonRetryableSubagentError(resultText(details));
@@ -1057,20 +1076,12 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						details,
 					};
 				} catch (error) {
-					if (
-						signal?.aborted ||
-						(!(error instanceof NonRetryableSubagentError) &&
-							candidateIndex + 1 < modelRefs.length &&
-							isRetryableProviderFailure(error instanceof Error ? error : String(error)))
-					) {
-						await pi
-							.exec("herdr", ["tab", "close", created.tabId], {
-								timeout: 10_000,
-							})
-							.catch(() => undefined);
-						activeTabs.delete(created.tabId);
-						if (!signal?.aborted) continue;
-					}
+					const retryable =
+						!(error instanceof NonRetryableSubagentError) &&
+						candidateIndex + 1 < modelRefs.length &&
+						isRetryableProviderFailure(error instanceof Error ? error : String(error));
+					if (autoClose || signal?.aborted || retryable) await closeChildTab();
+					if (retryable && !signal?.aborted) continue;
 					throw error;
 				}
 			}
@@ -1106,7 +1117,9 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			let text = `${icon} ${theme.fg("toolTitle", theme.bold(label))}`;
 			const state = blocked ? "blocked · needs input" : details.status;
 			text += theme.fg("muted", ` · ${state}${duration ? ` · ${duration}` : ""}`);
-			text += `\n  ${theme.fg("accent", details.attachCommand)}`;
+			text += details.autoClosed
+				? `\n  ${theme.fg("dim", "Herdr pane auto-closed")}`
+				: `\n  ${theme.fg("accent", details.attachCommand)}`;
 			text += `\n  ${theme.fg("dim", `${details.provider}/${details.model} (${details.thinking})`)}`;
 
 			if (running && details.pane) {
@@ -1118,8 +1131,10 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 				const visible = expanded ? outputLines : outputLines.slice(0, 8);
 				text += `\n\n${visible.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
 				if (!expanded && outputLines.length > visible.length) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
-				text += `\n\n  ${theme.fg("dim", `capture: ${details.captureCommand}`)}`;
-				text += `\n  ${theme.fg("dim", `cleanup: ${details.killCommand}`)}`;
+				if (!details.autoClosed) {
+					text += `\n\n  ${theme.fg("dim", `capture: ${details.captureCommand}`)}`;
+					text += `\n  ${theme.fg("dim", `cleanup: ${details.killCommand}`)}`;
+				}
 			}
 			return new Text(text, 0, 0);
 		},

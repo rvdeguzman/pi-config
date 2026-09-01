@@ -72,6 +72,8 @@ test("run details validation rejects empty and malformed details", () => {
 	assert.equal(isRunDetails({}), false);
 	assert.equal(isRunDetails({ ...validDetails, status: "bogus" }), false);
 	assert.equal(isRunDetails({ ...validDetails, model: undefined }), false);
+	assert.equal(isRunDetails({ ...validDetails, autoClosed: "yes" }), false);
+	assert.equal(isRunDetails({ ...validDetails, autoClosed: true }), true);
 	assert.equal(isRunDetails(validDetails), true);
 });
 
@@ -105,6 +107,12 @@ test("aborted child results expose both error and stop reason", () => {
 	} as any);
 	assert.match(text, /Stop reason: aborted/);
 	assert.match(text, /Error: Operation aborted/);
+});
+
+test("auto-closed results do not advertise stale Herdr commands", () => {
+	const text = resultText({ ...validDetails, autoClosed: true } as any);
+	assert.match(text, /tab w1:t1 \(auto-closed\)/);
+	assert.doesNotMatch(text, /Attach:|Capture:|Clean up:/);
 });
 
 test("worker children do not register delegation tools", () => {
@@ -233,11 +241,12 @@ test("herdr_worker dispatches immediately without polling for a result", async (
 	}
 });
 
-test("a result arriving during exit grace wins over the exit sentinel", async () => {
+test("a result arriving during exit grace wins over the exit sentinel and auto-closes its tab", async () => {
 	let tool: any;
 	let childCommand = "";
 	let resultPath = "";
 	let sentinel = "";
+	const closedTabs: string[] = [];
 	const sessionId = `grace-race-${Date.now()}`;
 	const previousWorkspace = process.env.HERDR_WORKSPACE_ID;
 	delete process.env.HERDR_WORKSPACE_ID;
@@ -297,6 +306,10 @@ test("a result arriving during exit grace wins over the exit sentinel", async ()
 			if (args[0] === "agent" && args[1] === "get") {
 				return { code: 1, stdout: "", stderr: "no agent", killed: false };
 			}
+			if (args[0] === "tab" && args[1] === "close") {
+				closedTabs.push(args[2] ?? "");
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
 			throw new Error(`unexpected herdr args: ${args.join(" ")}`);
 		},
 	} as any;
@@ -316,7 +329,10 @@ test("a result arriving during exit grace wins over the exit sentinel", async ()
 			},
 		);
 		assert.match(result.content[0].text, /late but valid/);
-		assert.ok(childCommand);
+		assert.match(result.content[0].text, /auto-closed/);
+		assert.equal(result.details.autoClosed, true);
+		assert.match(childCommand, /PI_HERDR_SUBAGENT_EXIT_ON_FINISH=1/);
+		assert.deepEqual(closedTabs, ["w1:t1"]);
 	} finally {
 		if (previousWorkspace === undefined) delete process.env.HERDR_WORKSPACE_ID;
 		else process.env.HERDR_WORKSPACE_ID = previousWorkspace;
@@ -324,11 +340,12 @@ test("a result arriving during exit grace wins over the exit sentinel", async ()
 	}
 });
 
-test("sibling subagent calls run concurrently", async () => {
+test("sibling subagent calls run concurrently and auto-close independently", async () => {
 	let tool: any;
 	let paneSequence = 0;
 	let activeRuns = 0;
 	let maximumActiveRuns = 0;
+	const closedTabs: string[] = [];
 	const resultDirectories: string[] = [];
 	const pi = {
 		on: () => undefined,
@@ -376,6 +393,10 @@ test("sibling subagent calls run concurrently", async () => {
 			}
 			if (args[0] === "pane" && args[1] === "read") return { code: 0, stdout: "", stderr: "", killed: false };
 			if (args[0] === "agent" && args[1] === "get") return { code: 1, stdout: "", stderr: "", killed: false };
+			if (args[0] === "tab" && args[1] === "close") {
+				closedTabs.push(args[2] ?? "");
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
 			throw new Error(`unexpected herdr args: ${args.join(" ")}`);
 		},
 	} as any;
@@ -392,6 +413,7 @@ test("sibling subagent calls run concurrently", async () => {
 			tool.execute("two", { agent: "scout", task: "second" }, undefined, undefined, ctx),
 		]);
 		assert.equal(maximumActiveRuns, 2);
+		assert.deepEqual(closedTabs.sort(), ["w1:t1", "w2:t1"]);
 	} finally {
 		await Promise.all(resultDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
 	}
