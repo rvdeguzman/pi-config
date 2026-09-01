@@ -139,7 +139,7 @@ The extension exposes the available profile names in the tool description so the
 
 ## Concurrency
 
-The caller controls concurrency by issuing the desired number of ordinary `herdr_subagent` or `herdr_worker` calls.
+The caller controls concurrency by issuing the desired number of ordinary `herdr_subagent`, `herdr_async`, or `herdr_worker` calls.
 
 - Sibling calls emitted by the parent may execute concurrently through Pi's normal parallel tool execution.
 - Sequential blocking subagent calls remain sequential when the parent waits for one result before issuing the next.
@@ -149,7 +149,7 @@ The caller controls concurrency by issuing the desired number of ordinary `herdr
 - The current extension-wide serial queue must be removed.
 - The implementation may retain a fixed defensive process ceiling only as a safety guard; it must not choose how many agents the caller should spawn.
 
-Each call has independent cancellation, result data, Herdr identifiers, and lifecycle state. Session shutdown closes every unfinished child owned by that parent session, not just one active tab.
+Each reported call has independent cancellation, result data, Herdr identifiers, and lifecycle state. Session shutdown closes unfinished blocking and async children owned by that parent session. No-result worker tabs intentionally remain open for explicit inspection and cleanup.
 
 ## `&agent` references and autocomplete
 
@@ -161,9 +161,9 @@ Humans can explicitly reference a profile in the editor:
 &worker implement the approved change and run the focused tests
 ```
 
-An `&name` reference is an instruction to the parent to use that agent profile. It does not bypass the parent or launch a child directly. The parent still writes the complete `task` passed to `herdr_subagent`, adding relevant context and constraints from the conversation.
+An `&name` reference is an instruction to the parent to use that agent profile asynchronously through `herdr_async`. This includes `&worker`. It does not bypass the parent or launch a child directly: the parent still writes the complete task, adding relevant context and constraints from the conversation.
 
-Every reference requests a fresh child invocation. It does not address or steer an already-running child.
+Every reference requests a fresh async child invocation. It does not address or steer an already-running child. `herdr_subagent` remains available for parent-selected blocking dependencies, while `herdr_worker` is reserved for deliberate no-result dispatch.
 
 ### Autocomplete behavior
 
@@ -172,7 +172,7 @@ Install an autocomplete provider through `ctx.ui.addAutocompleteProvider()`:
 - Trigger on `&` only; do not interfere with Pi's `@` file completion.
 - Match a token at the start of input or after whitespace.
 - Match profile names by case-insensitive prefix.
-- Read suggestions from the same profile registry used by `herdr_subagent`.
+- Read suggestions from the same profile registry used by all three Herdr delegation tools.
 - Display labels as `&<name>`.
 - Insert the literal `&<name>` followed by one space.
 - Delegate to the previously installed autocomplete provider whenever the cursor is not in an agent-reference token or no profile matches.
@@ -191,8 +191,10 @@ Unknown `&name` text is left unchanged. The extension does not silently substitu
 
 When profiles are available, add concise guidance to the parent system prompt:
 
-- Treat a valid `&name` reference as the user's explicit request to delegate through that profile.
+- Treat a valid `&name` reference as the user's explicit request to delegate asynchronously through that profile.
+- Route every valid reference through `herdr_async`, including `&worker`.
 - Compose a complete, self-contained task for each child rather than forwarding an underspecified fragment blindly.
+- Use `herdr_subagent` only for a parent-selected blocking dependency and `herdr_worker` only when no automatic result is wanted.
 - Do not add model, thinking, or tool overrides; the profile owns those settings.
 - The number and ordering of child calls remain the parent's decision unless the user explicitly requests particular references or parallelism.
 
@@ -284,5 +286,5 @@ Add focused tests for:
 - Each child remains visible and inspectable in Herdr while running; completed blocking and async tabs auto-close, while worker tabs remain open.
 - Async completion and failure are delivered exactly once as steer messages without polling by the model.
 - Typing `&` offers current profile names and inserts a literal `&name ` reference.
-- A valid reference tells the parent which profile to use while leaving task composition to the parent.
+- A valid reference routes through `herdr_async`, including `&worker`, while leaving task composition to the parent.
 - No workflow, chain, automatic role prompt, profile concurrency, or nested-subagent system is introduced.

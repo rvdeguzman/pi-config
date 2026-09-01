@@ -138,7 +138,7 @@ test("worker children do not register delegation tools", () => {
 	}
 });
 
-test("worker references route only to the fire-and-forget tool", async () => {
+test("all explicit agent references route through async Herdr, including worker", async () => {
 	const handlers = new Map<string, (...args: any[]) => any>();
 	const tools = new Map<string, any>();
 	let execCalled = false;
@@ -154,20 +154,25 @@ test("worker references route only to the fire-and-forget tool", async () => {
 
 	herdrSubagentExtension(pi);
 	const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {});
-	assert.match(prompt.systemPrompt, /Route &worker through herdr_worker so it is fire-and-forget/);
-	assert.match(prompt.systemPrompt, /never pass worker to herdr_subagent/);
+	assert.match(prompt.systemPrompt, /Route every valid &name through herdr_async, including &worker/);
+	assert.match(prompt.systemPrompt, /herdr_subagent only for a parent-selected blocking dependency/);
+	assert.match(prompt.systemPrompt, /herdr_worker only when no automatic result is wanted/);
 
+	const asyncTool = tools.get("herdr_async");
 	const subagent = tools.get("herdr_subagent");
 	const worker = tools.get("herdr_worker");
+	assert.ok(asyncTool);
 	assert.ok(subagent);
 	assert.ok(worker);
-	assert.match(worker.promptGuidelines.join("\n"), /&worker reference through herdr_worker/);
+	assert.match(asyncTool.promptGuidelines.join("\n"), /every explicit &name.*including &worker/);
+	assert.doesNotMatch(worker.promptGuidelines.join("\n"), /Route an explicit &worker/);
+	assert.match(worker.promptGuidelines.join("\n"), /no automatic completion result/);
 	assert.match(subagent.description, /Available blocking profiles:/);
 	assert.doesNotMatch(subagent.description, /Available blocking profiles:[^.]*worker/);
-	assert.match(subagent.promptGuidelines.join("\n"), /Never pass worker to herdr_subagent/);
+	assert.match(subagent.promptGuidelines.join("\n"), /route explicit &name references through herdr_async/);
 	await assert.rejects(
 		subagent.execute("blocking-worker", { agent: "WoRkEr", task: "implement it" }, undefined, undefined, {}),
-		/worker profile is reserved.*Call herdr_worker/s,
+		/worker profile is not available.*Use herdr_async.*herdr_worker/s,
 	);
 	assert.equal(execCalled, false);
 });
