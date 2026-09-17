@@ -6,7 +6,7 @@ import herdrSubagentExtension from "../herdr-subagent.ts";
 
 // Full extension wiring: mocked Jev + mocked Herdr, real profile/policy loading,
 // real private executor handoff and result-file/monitor lifecycle. No live API.
-test("automatic routing launches the chosen model through both runners; explicit profile dispatch bypasses Jev", async () => {
+test("automatic routing launches the chosen model/effort through both runners; explicit dispatch preserves profile defaults", async () => {
 	const previousKey = process.env.TYPESAFE_API_KEY;
 	const previousWorkspace = process.env.HERDR_WORKSPACE_ID;
 	const previousFetch = globalThis.fetch;
@@ -20,8 +20,9 @@ test("automatic routing launches the chosen model through both runners; explicit
 	const resultPaths: string[] = [];
 	const entries: any[] = [];
 	let requests = 0;
+	let executionEffort = "low";
 	const toolNames = ["read", "grep", "find", "ls", "herdr_delegate", "herdr_async", "herdr_subagent", "herdr_worker"];
-	const models = ["gpt-5.6-luna", "gpt-5.6-sol"].map((id) => ({ provider: "openai-codex", id, reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }));
+	const models = ["gpt-5.6-luna", "gpt-5.6-sol"].map((id) => ({ provider: "openai-codex", id, reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }));
 	const sessionId = `routing-test-${Date.now()}`;
 	const ctx: any = {
 		cwd: process.cwd(), hasUI: false,
@@ -35,7 +36,7 @@ test("automatic routing launches the chosen model through both runners; explicit
 		requests++;
 		const request = JSON.parse(init!.body as string);
 		return Response.json({ answers: Object.fromEntries(Object.entries(request.questions).map(([name, question]: [string, any]) => {
-			const choice = name === "dispatch" ? "delegate" : name === "profile" ? "scout" : "openai-codex/gpt-5.6-sol";
+			const choice = name === "dispatch" ? "delegate" : name === "profile" ? "scout" : `openai-codex/gpt-5.6-sol:${executionEffort}`;
 			const labels = Object.keys(question.criteria);
 			return [name, { type: "choice", choice, confidence: 0.99, probabilities: Object.fromEntries(labels.map((label) => [label, label === choice ? 0.99 : 0.01 / (labels.length - 1)])) }];
 		})) });
@@ -47,6 +48,8 @@ test("automatic routing launches the chosen model through both runners; explicit
 		getAllTools: () => toolNames.map((name) => ({ name })),
 		getActiveTools: () => toolNames,
 		getThinkingLevel: () => "high",
+		setThinkingLevel: () => { throw new Error("Must not change parent effort"); },
+		setModel: () => { throw new Error("Must not change parent model"); },
 		appendEntry: (customType: string, data: any) => entries.push({ type: "custom", customType, data }),
 		sendMessage: (message: any) => results.push(message),
 		exec: async (_command: string, args: string[]) => {
@@ -73,10 +76,12 @@ test("automatic routing launches the chosen model through both runners; explicit
 		for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
 		await commands.get("delegate-auto").handler("on", ctx);
 		for (const delivery of ["async", "blocking"]) {
+			executionEffort = delivery === "async" ? "low" : "max";
 			const result = await tools.get("herdr_delegate").execute(`routed-${delivery}`, { task: "Trace the subsystem", context: "Read only. Return file citations.", delivery }, undefined, undefined, ctx);
 			assert.equal(result.details.action, "delegate");
 			assert.match(childCommands.at(-1)!, /'--model' 'gpt-5.6-sol'/);
-			assert.match(childCommands.at(-1)!, /'--thinking' 'xhigh'/);
+			assert.ok(childCommands.at(-1)!.includes(`'--thinking' '${executionEffort}'`));
+			assert.equal(result.details.routing.thinking, executionEffort);
 			assert.match(childCommands.at(-1)!, /'--tools' 'read,grep,find,ls'/);
 			assert.doesNotMatch(childCommands.at(-1)!.match(/'--tools' '[^']*'/)![0], /herdr_/);
 		}
@@ -84,6 +89,9 @@ test("automatic routing launches the chosen model through both runners; explicit
 		await tools.get("herdr_async").execute("explicit", { agent: "scout", task: "Trace the subsystem" }, undefined, undefined, ctx);
 		assert.equal(requests, 4, "explicit direct dispatch must not invoke Jev");
 		assert.match(childCommands.at(-1)!, /'--model' 'gpt-5.6-luna'/);
+		assert.match(childCommands.at(-1)!, /'--thinking' 'xhigh'/);
+		assert.equal(ctx.model.id, "gpt-5.6-luna");
+		assert.equal(pi.getThinkingLevel(), "high");
 		const deadline = Date.now() + 2000;
 		while (results.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
 		assert.equal(results.length, 2, "both async children deliver exactly one result");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerAutoDelegation } from "../lib/auto-delegation.ts";
-import type { AgentProfile } from "../lib/subagent-profiles.ts";
+import type { AgentProfile, ThinkingLevel } from "../lib/subagent-profiles.ts";
 import type { RoutingDecision, RoutingPolicy } from "../lib/jev-routing.ts";
 
 const policy: RoutingPolicy = {
@@ -12,13 +12,13 @@ const policy: RoutingPolicy = {
 		researcher: { description: "Web research", models: [{ id: "p/large", description: "Deep" }] },
 	},
 };
-const models = ["small", "large", "outside"].map((id) => ({ provider: "p", id, reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }));
+const models = ["small", "large", "outside"].map((id) => ({ provider: "p", id, reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }));
 const profiles: AgentProfile[] = [
 	{ name: "scout", model: "p/small", thinking: "xhigh", tools: ["read"] },
 	{ name: "worker", model: "p/large", thinking: "high" },
 	{ name: "researcher", model: "p/large", thinking: "medium", tools: ["read", "missing_web_tool"] },
 ];
-const positive = (profile = "scout", model = "p/large"): RoutingDecision => ({ action: "delegate", profile, model, evidence: [], elapsedMs: 1 });
+const positive = (profile = "scout", model = "p/large", thinking: ThinkingLevel = "low"): RoutingDecision => ({ action: "delegate", profile, model, thinking, evidence: [], elapsedMs: 1 });
 
 function harness() {
 	const handlers = new Map<string, Array<(...args: any[]) => any>>();
@@ -41,6 +41,8 @@ function harness() {
 		registerTool: (definition: any) => tools.set(definition.name, definition),
 		getActiveTools: () => active,
 		getThinkingLevel: () => "medium",
+		setThinkingLevel: () => { throw new Error("Parent effort must not change"); },
+		setModel: () => { throw new Error("Parent model must not change"); },
 		appendEntry: (customType: string, data: any) => branch.push({ type: "custom", customType, data }),
 	};
 	const ctx: any = {
@@ -119,7 +121,7 @@ test("session branch persistence restores on reload/tree; new branch defaults of
 	assert.equal(await h.prompt(), "base");
 });
 
-test("prepares only available, scoped, permitted profiles/models and preserves thinking", async () => {
+test("prepares supported efforts and applies Jev's choice instead of inherited profile/parent effort", async () => {
 	const h = harness(); await h.command("on");
 	const result = await h.run({ context: "Parent can inspect tests concurrently.", cwd: "/tmp" });
 	assert.equal(result.details.action, "delegate");
@@ -129,11 +131,84 @@ test("prepares only available, scoped, permitted profiles/models and preserves t
 	assert.deepEqual(candidates[0].models.map((m: any) => m.id), ["p/small", "p/large"]);
 	assert.equal(h.dispatched[0][0], "async");
 	assert.equal(h.dispatched[0][1].model, "p/large");
-	assert.equal(h.dispatched[0][1].thinking, "xhigh");
+	assert.deepEqual(candidates[0].models[0].thinkingLevels, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+	assert.equal(h.dispatched[0][1].thinking, "low");
+	assert.equal(result.details.routing.thinking, "low");
+	assert.match(result.content[0].text, /p\/large \(low\)/);
+	assert.equal(profiles[0]!.thinking, "xhigh", "profile defaults stay unchanged for direct requests");
 	assert.deepEqual(h.dispatched[0][1].tools, ["read"]);
 	assert.match(h.dispatched[0][3].task, /Parent can inspect tests concurrently/);
 	assert.equal(h.dispatched[0][3].cwd, "/tmp");
 	assert.equal(profiles[0]!.model, "p/small", "profile configuration stays untouched");
+});
+
+test("supports all reported levels including off/minimal/xhigh/max", async () => {
+	for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+		const h = harness(); await h.command("on");
+		h.setEvaluator(async () => positive("scout", "p/large", thinking));
+		assert.equal((await h.run()).details.action, "delegate");
+		assert.equal(h.dispatched[0][1].thinking, thinking);
+	}
+});
+
+test("model capabilities exclude unsupported holes and limit non-reasoning models to off", async () => {
+	const h = harness(); await h.command("on");
+	h.ctx.modelRegistry.getAvailable = () => [
+		{ ...models[0], reasoning: false },
+		{ ...models[1], thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: "max" } },
+	];
+	h.setEvaluator(async () => positive("scout", "p/large", "max"));
+	assert.equal((await h.run()).details.action, "delegate");
+	assert.deepEqual(h.routes[0][2][0].models.map((m: any) => m.thinkingLevels), [["off"], ["high", "max"]]);
+	h.setEvaluator(async () => positive("scout", "p/small", "off"));
+	assert.equal((await h.run()).details.action, "delegate");
+	h.setEvaluator(async () => positive("scout", "p/small", "high"));
+	assert.equal((await h.run()).details.action, "parent", "never silently clamp a chosen effort");
+	h.setEvaluator(async () => positive("scout", "p/large", "xhigh"));
+	assert.equal((await h.run()).details.action, "parent");
+	assert.equal(h.dispatched.length, 2);
+});
+
+test("scoped effort pins override automatic effort choice, not the profile default", async () => {
+	const h = harness(); await h.command("on");
+	h.ctx.scopedModels = [{ model: models[1], thinkingLevel: "medium" }];
+	h.setEvaluator(async () => positive("scout", "p/large", "medium"));
+	assert.equal((await h.run()).details.action, "delegate");
+	assert.deepEqual(h.routes[0][2][0].models[0].thinkingLevels, ["medium"]);
+	h.setEvaluator(async () => positive("scout", "p/large", "high"));
+	assert.equal((await h.run()).details.action, "parent");
+	assert.equal(h.dispatched.length, 1);
+});
+
+test("unsupported scoped pin excludes the model instead of clamping the pin", async () => {
+	const h = harness(); await h.command("on");
+	h.ctx.modelRegistry.getAvailable = () => [{ ...models[0], reasoning: false }];
+	h.ctx.scopedModels = [{ model: models[0], thinkingLevel: "high" }];
+	h.setEvaluator(async () => positive("scout", "p/small", "off"));
+	assert.equal((await h.run()).details.action, "parent");
+	assert.deepEqual(h.routes[0][2], []);
+	assert.equal(h.dispatched.length, 0);
+});
+
+test("capability or effort-pin changes during classification invalidate the pending route", async () => {
+	for (const mutate of [
+		(h: ReturnType<typeof harness>) => { h.ctx.scopedModels = [{ model: models[1], thinkingLevel: "high" }]; },
+		(h: ReturnType<typeof harness>) => { h.ctx.modelRegistry.getAvailable = () => [{ ...models[1], thinkingLevelMap: { low: null } }]; },
+	]) {
+		const h = harness(); await h.command("on");
+		h.setEvaluator(async () => { mutate(h); return positive(); });
+		assert.equal((await h.run()).details.action, "parent");
+		assert.equal(h.dispatched.length, 0);
+	}
+});
+
+test("missing or invented effort in a decision cannot launch a child", async () => {
+	for (const thinking of [undefined, "ultra"]) {
+		const h = harness(); await h.command("on");
+		h.setEvaluator(async () => ({ ...positive(), thinking } as any));
+		assert.equal((await h.run()).details.action, "parent");
+		assert.equal(h.dispatched.length, 0);
+	}
 });
 
 test("pinning an agent restricts candidates but still invokes the dispatch gate", async () => {

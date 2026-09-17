@@ -9,10 +9,10 @@ const policy: RoutingPolicy = {
 };
 const candidates: RouteCandidate[] = [
 	{ profile: "scout", description: "Read local code", tools: ["read"], models: [
-		{ id: "provider/small", description: "Routine", thinking: "high" },
-		{ id: "provider/large", description: "Deep", thinking: "high" },
+		{ id: "provider/small", description: "Routine", thinkingLevels: ["low", "high"] },
+		{ id: "provider/large", description: "Deep", thinkingLevels: ["medium", "high", "xhigh", "max"] },
 	] },
-	{ profile: "worker", description: "Implement", tools: ["write"], models: [{ id: "provider/large", description: "Deep", thinking: "high" }] },
+	{ profile: "worker", description: "Implement", tools: ["write"], models: [{ id: "provider/large", description: "Deep", thinkingLevels: ["high"] }] },
 ];
 const task: RoutingTask = { task: "Trace a difficult cross-module initialization path and cite all relevant files.", delivery: "async", allowWrites: false };
 
@@ -29,7 +29,7 @@ function transport(choices: Record<string, string> = {}) {
 		assert.equal((options?.headers as any).Authorization, "Bearer secret-test-key");
 		const request = JSON.parse(options!.body as string);
 		calls.push(request);
-		const payload = { answers: Object.fromEntries(Object.entries(request.questions).map(([name, question]: [string, any]) => [name, answer(Object.keys(question.criteria), choices[name] ?? ({ dispatch: "delegate", profile: "scout", model: "provider/large" } as any)[name])])) };
+		const payload = { answers: Object.fromEntries(Object.entries(request.questions).map(([name, question]: [string, any]) => [name, answer(Object.keys(question.criteria), choices[name] ?? ({ dispatch: "delegate", profile: "scout", execution: "provider/large:high" } as any)[name])])) };
 		mutate?.(payload, request);
 		return Response.json(payload);
 	};
@@ -54,20 +54,23 @@ test("dispatch gate keeps task in parent and never asks for a model", async () =
 	assert.equal(t.calls.length, 1);
 });
 
-test("gates dispatch, chooses profile, then only offers that profile's models", async () => {
+test("gates dispatch, chooses profile, then jointly selects model and effort", async () => {
 	const t = transport();
 	const result = await decideRoute(policy, task, candidates, options(t.fetcher));
 	assert.equal(result.action, "delegate");
 	if (result.action !== "delegate") return;
 	assert.equal(result.profile, "scout");
 	assert.equal(result.model, "provider/large");
-	assert.equal(t.calls.length, 2);
+	assert.equal(result.thinking, "high");
+	assert.equal(t.calls.length, 2, "effort uses the existing execution request, not a third call");
 	assert.equal(t.calls[1].state.selectedProfile, "scout");
-	assert.deepEqual(Object.keys(t.calls[1].questions.model.criteria), ["provider/small", "provider/large"]);
-	assert.deepEqual(result.evidence.map((entry) => entry.stage), ["dispatch", "profile", "model"]);
+	assert.deepEqual(Object.keys(t.calls[1].questions.execution.criteria), [
+		"provider/small:low", "provider/small:high", "provider/large:medium", "provider/large:high", "provider/large:xhigh", "provider/large:max",
+	]);
+	assert.deepEqual(result.evidence.map((entry) => entry.stage), ["dispatch", "profile", "execution"]);
 });
 
-test("pinning a profile still evaluates dispatch; a singleton model needs no second call", async () => {
+test("pinning a profile still evaluates dispatch; a singleton model/effort needs no second call", async () => {
 	const t = transport();
 	const result = await decideRoute(policy, { ...task, agent: "worker", allowWrites: true }, candidates, options(t.fetcher));
 	assert.equal(result.action, "delegate");
@@ -76,13 +79,13 @@ test("pinning a profile still evaluates dispatch; a singleton model needs no sec
 	assert.deepEqual(Object.keys(t.calls[0].questions), ["dispatch"]);
 });
 
-for (const stage of ["dispatch", "profile", "model"]) {
+for (const stage of ["dispatch", "profile", "execution"]) {
 	test(`low ${stage} confidence returns parent`, async () => {
 		const t = transport();
 		t.mutate((payload) => { if (payload.answers[stage]) payload.answers[stage].confidence = 0.2; });
 		const result = await decideRoute(policy, task, candidates, options(t.fetcher));
 		assert.equal(result.action, "parent");
-		assert.equal(t.calls.length, stage === "model" ? 2 : 1);
+		assert.equal(t.calls.length, stage === "execution" ? 2 : 1);
 	});
 }
 
@@ -100,10 +103,41 @@ test("strict response validation rejects unknown, missing, malformed, and incons
 	}
 });
 
-test("hallucinated model returns parent instead of falling back to an arbitrary model", async () => {
+test("hallucinated model or unsupported effort returns parent without substitution", async () => {
+	for (const choice of ["provider/unapproved:high", "provider/small:max", "provider/large:ultra", "provider/large"]) {
+		const t = transport();
+		t.mutate((payload) => { if (payload.answers.execution) payload.answers.execution.choice = choice; });
+		assert.equal((await decideRoute(policy, task, candidates, options(t.fetcher))).action, "parent");
+	}
+});
+
+test("one model with multiple efforts still requires Jev's execution decision", async () => {
+	const t = transport({ execution: "provider/large:max" });
+	const single = [{ ...candidates[0]!, models: [candidates[0]!.models[1]!] }];
+	const result = await decideRoute(policy, task, single, options(t.fetcher));
+	assert.equal(result.action, "delegate");
+	if (result.action === "delegate") assert.equal(result.thinking, "max");
+	assert.equal(t.calls.length, 2);
+});
+
+test("model IDs containing colons are looked up as pairs, never split", async () => {
+	const t = transport({ execution: "provider/model:version:low" });
+	const single: RouteCandidate[] = [{ ...candidates[0]!, models: [{ id: "provider/model:version", description: "Versioned", thinkingLevels: ["low", "high"] }] }];
+	const result = await decideRoute(policy, task, single, options(t.fetcher));
+	assert.equal(result.action, "delegate");
+	if (result.action === "delegate") {
+		assert.equal(result.model, "provider/model:version");
+		assert.equal(result.thinking, "low");
+	}
+});
+
+test("oversized expanded execution choices stay in the parent without an oversized API call", async () => {
 	const t = transport();
-	t.mutate((payload) => { if (payload.answers.model) payload.answers.model.choice = "provider/unapproved"; });
-	assert.equal((await decideRoute(policy, task, candidates, options(t.fetcher))).action, "parent");
+	const oversized: RouteCandidate[] = [{ ...candidates[0]!, models: Array.from({ length: 40 }, (_, i) => ({
+		id: `provider/${i}`, description: "Model", thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+	})) }];
+	assert.equal((await decideRoute(policy, task, oversized, options(t.fetcher))).action, "parent");
+	assert.equal(t.calls.length, 1);
 });
 
 test("missing key, no candidates, oversized input, and cancellation skip network", async () => {

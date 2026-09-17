@@ -23,7 +23,7 @@ There is no workflow engine and no profile-level concurrency policy.
 
 ### Opt-in Jev routing
 
-The direct tools below retain their existing behavior. `/delegate-auto on` additionally enables `herdr_delegate({ task, context?, agent?, delivery?, allowWrites?, cwd? })`: Jev gates dispatch, selects an eligible profile (unless pinned), then selects a model from the global routing-policy allowlist intersected with available/scoped models. Uncertain or failed routing returns the task to the parent without launching a child. Explicit `&name` requests bypass Jev through `herdr_async` as before. See [HERDR-ROUTING.md](extensions/HERDR-ROUTING.md) for setup, policy, privacy, and lifecycle details.
+The direct tools below retain their existing behavior. `/delegate-auto on` additionally enables `herdr_delegate({ task, context?, agent?, delivery?, allowWrites?, cwd? })`: Jev gates dispatch, selects an eligible profile (unless pinned), then jointly selects a model and effort from the global routing-policy model allowlist intersected with available/scoped models and each model's supported thinking levels. Scoped effort pins are hard constraints; otherwise all supported levels are eligible, independent of profile/parent thinking defaults. Uncertain or failed routing returns the task to the parent without launching a child. Explicit `&name` requests bypass Jev through `herdr_async` as before. See [HERDR-ROUTING.md](extensions/HERDR-ROUTING.md) for setup, policy, privacy, and lifecycle details.
 
 ## Agent profiles
 

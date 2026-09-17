@@ -1,6 +1,6 @@
 # Opt-in Jev delegation
 
-Jev decides **whether to dispatch**, **which profile**, and **which execution model** for one parent-authored task. The existing Herdr runners still launch and monitor the child. No new workflow engine, recursive delegation, or automatic fire-and-forget path is introduced.
+Jev decides **whether to dispatch**, **which profile**, and **which execution model + reasoning effort** for one parent-authored task. The existing Herdr runners still launch and monitor the child. No new workflow engine, recursive delegation, or automatic fire-and-forget path is introduced.
 
 ## Enable
 
@@ -25,7 +25,7 @@ herdr_delegate({
 The parent still identifies task boundaries, supplies complete instructions and expected output, and controls the number/order of calls. Jev does **not** automatically decompose every user prompt or start agents from raw input. The enabled mode adds guidance to use this tool for candidate subtasks before choosing a direct dispatch path.
 
 - Omit `agent` to let Jev choose an eligible profile.
-- Set `agent: "scout"` (for example) to pin the profile for a planned task; Jev still gates dispatch and chooses its model.
+- Set `agent: "scout"` (for example) to pin the profile for a planned task; Jev still gates dispatch and chooses its model/effort pair.
 - `allowWrites` defaults to `false`. Set it to `true` **only for user-authorized implementation**. This permits, but does not force, write-capable profiles. It is not an OS sandbox or independent proof of authorization.
 - `delivery: "blocking"` excludes `worker`, matching the existing blocking runner.
 - `cwd` defaults to the current project and follows the existing runner's directory/trust checks.
@@ -33,7 +33,7 @@ The parent still identifies task boundaries, supplies complete instructions and 
 
 A retained task returns `details.action: "parent"`, a reason, and **no child is launched**. The parent handles it itself instead of bypassing the decision through another tool. This includes low confidence, routing errors, missing credentials, unavailable candidates, invalid decisions, and cancellation before launch. The no-bypass behavior is parent guidance, not a restriction on the direct tools needed for explicit user requests.
 
-A dispatched task returns `details.action: "delegate"`, routing evidence, and the original runner result under `details.child`. Async results arrive through the existing steer message. Blocking results return inline. Actual launch/child errors are still tool errors: they must not be mistaken for a no-launch decision or blindly retried, because a child may have started.
+A dispatched task returns `details.action: "delegate"`, routing evidence (including `details.routing.model` and `details.routing.thinking`), and the original runner result under `details.child`. The visible result also reports the chosen model and effort. Async results arrive through the existing steer message. Blocking results return inline. Actual launch/child errors are still tool errors: they must not be mistaken for a no-launch decision or blindly retried, because a child may have started.
 
 **Explicit `&scout`, `&researcher`, and `&worker` requests remain direct `herdr_async` calls.** They bypass Jev and keep the profile's configured model/thinking/tools. The three direct dispatch tools remain unchanged for manual use.
 
@@ -41,13 +41,17 @@ A dispatched task returns `details.action: "delegate"`, routing evidence, and th
 
 1. Build eligible candidates from live profiles, registered child-compatible tools, routing policy, available authenticated models, and `ctx.scopedModels`.
 2. Ask Jev whether delegation is worthwhile. In the same request, ask which profile would fit **if** delegation is worthwhile. These questions are independent; code gates on dispatch first. A pinned/single eligible profile needs no profile question.
-3. Only after a confident positive gate/profile decision, ask which of the selected profile's models fits. A single model needs no second request.
-4. Validate the response and re-read policy, profiles, tools, and model scope before launch. Changes invalidate the pending route instead of silently choosing something else.
-5. Pass the validated model to a private in-process runner entry point. No public model/tool/thinking override arguments are added to the direct tools.
+3. Only after a confident positive gate/profile decision, choose a **model/effort pair** from the selected profile's models and each model's supported efforts. This replaces the previous model-selection question, not an additional API stage. One model with several efforts still needs this request; exactly one eligible pair does not. Excessive expanded choice sets stay in the parent instead of making an oversized API request.
+4. Validate the response and re-read policy, profiles, tools, model capabilities, and scope before launch. Changes invalidate the pending route instead of silently choosing another model or clamping effort.
+5. Pass the validated pair to a private in-process runner entry point, using the existing child `--model` and `--thinking` flags. No public model/tool/thinking override arguments are added to the direct tools.
 
 Model candidates are the intersection of each profile's routing-policy allowlist and Pi's available models, restricted by the live scoped list when configured. An empty `ctx.scopedModels` means Pi has no scope configured; it does not remove the policy allowlist. No eligible intersection means stay in the parent.
 
-The selected profile's thinking level is retained and clamped to model support. If omitted, a scoped thinking pin takes precedence over the parent's thinking level. Routing does not modify profile files, Pi defaults, or the parent's model.
+For auto-routed tasks, Jev can choose **every effort Pi reports as supported** through `getSupportedThinkingLevels(model)`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` where available. Non-reasoning models offer only `off`; unsupported levels and holes in a model's thinking map are excluded. No effort allowlist needs to be added to the policy.
+
+An explicit scoped thinking pin restricts that model to the pinned level. If the pin is unsupported, the model is ineligible; it is not silently clamped. Otherwise, the profile's fixed `thinking` and the parent's current effort do **not** constrain auto-routing. Those defaults remain unchanged for direct tools and explicit `&profile` requests.
+
+Jev chooses the pair jointly, with instructions to prefer the lowest effort adequate for correctness and reserve extra-high/maximum effort for tasks that justify the additional compute/latency. The selected pair must remain eligible at launch. Routing never changes profile files, Pi defaults, or the parent's model/effort.
 
 Without write authorization, tools must all be in the conservative read-only set (`read`, `grep`, `find`, `ls`, and the three Exa search/fetch tools). Unknown/SDK-only tools exclude the profile. This means the current researcher profile is unavailable unless its Exa tools are registered. All four delegation tools are stripped from children. Plan mode disables and blocks every delegation entry point, including queued `herdr_async` and `herdr_delegate` calls.
 
@@ -73,6 +77,6 @@ The sidecar is an explicit opt-in model-routing allowlist. Existing `agents/*.md
 
 Run `make -C extensions/tests test`. The Makefile uses Pi's sibling Node executable and resolves its installed extension dependencies without installing packages into this config checkout. `NODE`, `NODE_TYPE_FLAGS`, and `PI_TEST_ENTRY` can be overridden for other installations. On macOS, a pending Xcode license can prevent `/usr/bin/make` from starting; select an already-installed Command Line Tools developer directory if appropriate.
 
-Tests cover fail-closed classification, bounded network calls, malformed distributions, authorization/scope filtering, persisted opt-in state, cancellation/revalidation races, explicit-request bypass, child tool stripping, plan-mode gates, and both runner launch paths with mocked Jev/Herdr. They do not validate live Jev credentials or classifier quality.
+Tests cover fail-closed classification, bounded network calls, malformed distributions, authorization/scope filtering, all supported efforts, unsupported/pinned effort rejection, persisted opt-in state, cancellation/revalidation races, explicit-request bypass, child tool stripping, plan-mode gates, and model/effort propagation through both runner launch paths with mocked Jev/Herdr. They do not validate live Jev credentials or classifier quality.
 
 Sources: [HTTP API](https://docs.typesafe.ai/api), [confidence semantics](https://docs.typesafe.ai/confidence), [independent questions/state](https://docs.typesafe.ai/concepts/state).
