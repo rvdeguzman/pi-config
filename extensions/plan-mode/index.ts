@@ -45,6 +45,8 @@ const PLAN_MODE_DISABLED_TOOLS = new Set<string>([
 	"todo",
 	"herdr_subagent",
 	"herdr_worker",
+	"herdr_async",
+	"herdr_delegate",
 ]);
 const PLAN_MANAGED_TOOLS = new Set<string>([...PLAN_MODE_TOOLS, ...NORMAL_MODE_TOOLS]);
 

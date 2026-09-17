@@ -28,7 +28,7 @@ function createHarness(entries: any[] = [], todoService?: TodoIntegrationService
 	const replacementPrompts: string[] = [];
 	const selectResults: Array<string | undefined> = [];
 	const inputResults: Array<string | undefined> = [];
-	let activeTools = ["read", "bash", "edit", "write", "todo", "herdr_subagent", "herdr_worker"];
+	let activeTools = ["read", "bash", "edit", "write", "todo", "herdr_subagent", "herdr_worker", "herdr_async", "herdr_delegate"];
 
 	const pi = {
 		events: {
@@ -285,6 +285,21 @@ test("implementation menu selects a range and exits plan mode before dispatch", 
 			options: { deliverAs: "followUp", expandPromptTemplates: true },
 		},
 	]);
+});
+
+test("plan mode disables and blocks every delegation entry point, including queued calls", async () => {
+	const h = createHarness();
+	await h.commands.get("plan")?.("", h.ctx);
+	for (const toolName of ["herdr_worker", "herdr_subagent", "herdr_async", "herdr_delegate"]) {
+		assert.equal(h.activeTools().includes(toolName), false);
+		const result = await h.handlers.get("tool_call")?.[0]?.({ toolName }, h.ctx) as { block?: boolean };
+		assert.equal(result.block, true);
+	}
+	await h.commands.get("plan")?.("", h.ctx);
+	for (const toolName of ["herdr_worker", "herdr_subagent", "herdr_async", "herdr_delegate"]) {
+		assert.equal(h.activeTools().includes(toolName), true);
+		assert.equal(await h.handlers.get("tool_call")?.[0]?.({ toolName }, h.ctx), undefined);
+	}
 });
 
 test("fresh milestone handoff carries the full plan and selected execution range", async () => {

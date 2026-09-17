@@ -21,6 +21,10 @@ The responsibility split is:
 
 There is no workflow engine and no profile-level concurrency policy.
 
+### Opt-in Jev routing
+
+The direct tools below retain their existing behavior. `/delegate-auto on` additionally enables `herdr_delegate({ task, context?, agent?, delivery?, allowWrites?, cwd? })`: Jev gates dispatch, selects an eligible profile (unless pinned), then selects a model from the global routing-policy allowlist intersected with available/scoped models. Uncertain or failed routing returns the task to the parent without launching a child. Explicit `&name` requests bypass Jev through `herdr_async` as before. See [HERDR-ROUTING.md](extensions/HERDR-ROUTING.md) for setup, policy, privacy, and lifecycle details.
+
 ## Agent profiles
 
 Profiles live in Markdown files under:
@@ -237,7 +241,7 @@ Blocking children remain visible and attachable while running, then shut down an
 - A child outside that tree starts without project approval.
 - Blocking child mode registers only its result reporter and does not register delegation tools.
 - Worker child mode registers neither `herdr_subagent` nor `herdr_worker` and performs no result reporting.
-- All three delegation tool names (`herdr_subagent`, `herdr_async`, and `herdr_worker`) are excluded from all child `--tools` allowlists.
+- All four delegation tool names (`herdr_subagent`, `herdr_async`, `herdr_worker`, and `herdr_delegate`) are excluded from all child `--tools` allowlists.
 - Profile file contents are configuration; Markdown bodies are ignored.
 - Shell commands must continue to use argument-safe construction and private run files.
 - Returned output remains capped at Pi's standard 50 KB / 2,000-line tool limit; the complete child session stays on disk.

@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import herdrSubagentExtension, { herdrOk, isRunDetails, parseChildExitCode, resultText } from "../herdr-subagent.ts";
+import extensionImpl, { herdrOk, isRunDetails, parseChildExitCode, resultText } from "../herdr-subagent.ts";
+
+function herdrSubagentExtension(pi: any): void {
+	extensionImpl({ registerCommand: () => undefined, ...pi });
+}
 
 function execPi(result: { code: number; stdout?: string; stderr?: string }) {
 	return {
@@ -277,8 +281,8 @@ test("herdr_async returns immediately and steers eventual completion or failure 
 		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 		registerTool: (definition: any) => tools.set(definition.name, definition),
 		getThinkingLevel: () => "high",
-		getAllTools: () => ["read", "herdr_subagent", "herdr_worker", "herdr_async"].map((name) => ({ name })),
-		getActiveTools: () => ["read", "herdr_subagent", "herdr_worker", "herdr_async"],
+		getAllTools: () => ["read", "herdr_subagent", "herdr_worker", "herdr_async", "herdr_delegate"].map((name) => ({ name })),
+		getActiveTools: () => ["read", "herdr_subagent", "herdr_worker", "herdr_async", "herdr_delegate"],
 		sendMessage: (message: any, options: any) => messages.push({ message, options }),
 		exec: async (_command: string, args: string[]) => {
 			if (args[0] === "--version") return { code: 0, stdout: "herdr test", stderr: "", killed: false };
@@ -345,7 +349,7 @@ test("herdr_async returns immediately and steers eventual completion or failure 
 		assert.match(childCommand, /PI_HERDR_SUBAGENT_CHILD=1/);
 		assert.match(childCommand, /PI_HERDR_SUBAGENT_EXIT_ON_FINISH=1/);
 		assert.match(childCommand, /'--tools' 'read'/);
-		assert.doesNotMatch(childCommand.match(/'--tools' '[^']*'/)?.[0] ?? "", /herdr_(?:subagent|worker|async)/);
+		assert.doesNotMatch(childCommand.match(/'--tools' '[^']*'/)?.[0] ?? "", /herdr_(?:subagent|worker|async|delegate)/);
 
 		await waitFor(() => messages.length === 1);
 		assert.ok(paneReads > 0);

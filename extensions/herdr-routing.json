@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "model": "jev-latest",
+  "timeoutMs": 2500,
+  "minConfidence": 0.8,
+  "minProbability": 0.7,
+  "objective": "Delegate only when the benefit exceeds context-transfer and review overhead. Preserve correctness while avoiding unnecessary compute. The model descriptions below are initial routing preferences, not measured guarantees; keep uncertain decisions in the parent.",
+  "profiles": {
+    "scout": {
+      "description": "Read-only local repository investigation: find files, trace code paths, explain existing behavior, and return source citations. Cannot use a shell, modify files, or research the web.",
+      "models": [
+        { "id": "openai-codex/gpt-5.6-luna", "description": "Preferred starting route for bounded file discovery, straightforward code tracing, and factual repository questions." },
+        { "id": "openai-codex/gpt-5.6-sol", "description": "Preferred route for cross-module analysis, subtle behavior, and investigations needing substantial synthesis." },
+        { "id": "openai-codex/gpt-6-astra", "description": "Reserve for unusually ambiguous architecture or deep reasoning across interacting subsystems." }
+      ]
+    },
+    "researcher": {
+      "description": "Read-only research using external documentation and web sources, comparison of alternatives, and evidence-backed recommendations with citations. Cannot implement changes or run a shell.",
+      "models": [
+        { "id": "openai-codex/gpt-5.6-luna", "description": "Preferred starting route for targeted documentation lookups with a clear factual question." },
+        { "id": "openai-codex/gpt-5.6-sol", "description": "Preferred route for comparing multiple sources, resolving conflicting documentation, and synthesizing recommendations." },
+        { "id": "openai-codex/gpt-6-astra", "description": "Reserve for difficult technical tradeoffs with substantial ambiguity and deep synthesis." }
+      ]
+    },
+    "worker": {
+      "description": "User-authorized implementation of a bounded change with clear acceptance criteria, non-overlapping file ownership, tests, and a report of changes. May modify files and execute tools; not eligible without write authorization. Async only.",
+      "models": [
+        { "id": "openai-codex/gpt-5.6-luna", "description": "Preferred starting route for mechanical, localized edits with unambiguous instructions and straightforward verification." },
+        { "id": "openai-codex/gpt-5.6-sol", "description": "Preferred route for ordinary feature implementation, bug fixes, tests, and multi-file changes." },
+        { "id": "openai-codex/gpt-6-astra", "description": "Reserve for difficult concurrency, architecture, or correctness work requiring deep reasoning; not merely because a task involves coding." }
+      ]
+    }
+  }
+}

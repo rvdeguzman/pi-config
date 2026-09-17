@@ -36,12 +36,14 @@ import {
 	truncateHead,
 	type ExtensionAPI,
 	type ExtensionContext,
+	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { createAgentRefAutocomplete } from "./lib/agent-ref-autocomplete.ts";
-import { subagentProfiles } from "./lib/subagent-profiles.ts";
+import { subagentProfiles, type AgentProfile } from "./lib/subagent-profiles.ts";
+import { registerAutoDelegation } from "./lib/auto-delegation.ts";
 
 const CHILD_ENV = "PI_HERDR_SUBAGENT_CHILD";
 const WORKER_CHILD_ENV = "PI_HERDR_WORKER_CHILD";
@@ -58,7 +60,7 @@ const WORKER_RUNS_DIR = "herdr-workers";
 const WORKER_PROFILE = "worker";
 const ASYNC_RESULT_TYPE = "herdr-async-result";
 const ASYNC_WIDGET_ID = "herdr-async";
-const DELEGATION_TOOL_NAMES = new Set(["herdr_subagent", "herdr_worker", "herdr_async"]);
+const DELEGATION_TOOL_NAMES = new Set(["herdr_subagent", "herdr_worker", "herdr_async", "herdr_delegate"]);
 const EXIT_SENTINEL_PREFIX = "__pi_herdr_subagent_exit__";
 const POLL_INTERVAL_MS = 500;
 /** Poll herdr's agent lifecycle state every N pane polls (it changes slowly). */
@@ -68,6 +70,11 @@ const PANE_READ_LINES = 60;
 const CAPTURE_LINES = 200;
 const EXIT_GRACE_MS = 1_500;
 const EXTENSION_PATH = fileURLToPath(import.meta.url);
+const DelegatedTaskParams = Type.Object({
+	agent: Type.String({ description: "Named profile from ~/.pi/agent/agents/*.md" }),
+	task: Type.String({ description: "The complete task for the child Pi process" }),
+	cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current project." })),
+});
 
 type RunStatus = "queued" | "running" | "completed" | "failed";
 type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
@@ -708,6 +715,14 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	const asyncRuns = new Map<string, AsyncRunRecord>();
 	let shuttingDown = false;
 
+	registerAutoDelegation(pi, {
+		resolveTools: (tools, profile) => resolveChildTools(pi, tools, profile),
+		dispatch: (delivery, profile, id, params, signal, onUpdate, ctx) =>
+			delivery === "async"
+				? asyncTool.execute(id, params, signal, onUpdate, ctx, profile)
+				: blockingTool.execute(id, params, signal, onUpdate, ctx, profile),
+	});
+
 	const updateAsyncWidget = (ctx: ExtensionContext): void => {
 		if (!ctx.hasUI || shuttingDown) return;
 		if (asyncRuns.size === 0) {
@@ -877,7 +892,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerTool({
+	const asyncTool = {
 		name: "herdr_async",
 		label: "Herdr Async",
 		description: `Dispatch one asynchronous delegated task using a named agent profile. Available profiles: ${allProfileNames.length ? allProfileNames.join(", ") : "(none)"}. Returns Herdr coordinates immediately, monitors the child in the background, and automatically steers its bounded final result back into this session. The first configured model candidate is used. Async runs are session-scoped and are cancelled when the parent session shuts down.`,
@@ -888,25 +903,13 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			"Provide herdr_async a named agent profile and a complete, self-contained task.",
 			"Do not poll a herdr_async run; its completion or failure is automatically steered into the parent session.",
 		],
-		parameters: Type.Object({
-			agent: Type.String({
-				description: "Named profile from ~/.pi/agent/agents/*.md",
-			}),
-			task: Type.String({
-				description: "The complete task for the asynchronous child Pi process",
-			}),
-			cwd: Type.Optional(
-				Type.String({
-					description: "Working directory. Defaults to the current project.",
-				}),
-			),
-		}),
+		parameters: DelegatedTaskParams,
 
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx, routedProfile?: AgentProfile) {
 			if (!params.task.trim()) throw new Error("Async subagent task must not be empty.");
 			if (signal?.aborted) throw new Error("Async subagent dispatch aborted.");
 
-			const profile = await subagentProfiles.get(params.agent);
+			const profile = routedProfile ?? await subagentProfiles.get(params.agent);
 			const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
 			const thinking = profile.thinking ?? pi.getThinkingLevel();
 			const modelRefs =
@@ -974,6 +977,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 				`; printf '\\n${exitSentinel} %s\\n' "$?"`,
 			].join(" ");
 
+			signal?.throwIfAborted();
 			const startedAt = Date.now();
 			const created = await createChildPane(pi, cwd, tabLabelFor(params.task, "async"));
 			spec.workspaceId = created.workspaceId;
@@ -1002,7 +1006,9 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			};
 
 			try {
+				signal?.throwIfAborted();
 				await herdrOk(pi, ["pane", "run", created.paneId, childCommand]);
+				signal?.throwIfAborted();
 			} catch (error) {
 				await closeChildTab();
 				throw error;
@@ -1162,9 +1168,10 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 				0,
 			);
 		},
-	});
+	} satisfies ToolDefinition<typeof DelegatedTaskParams>;
+	pi.registerTool(asyncTool);
 
-	pi.registerTool({
+	const blockingTool = {
 		name: "herdr_subagent",
 		label: "Herdr Subagent",
 		description: `Run one parent-selected blocking dependency in a separate Pi process using a named non-worker agent profile. Available blocking profiles: ${availableProfileNames.length ? availableProfileNames.join(", ") : "(none)"}. Use herdr_async for explicit &name references and asynchronous worker results; use herdr_worker only for no-result worker dispatch. Profiles are refreshed at call time; sibling calls may run concurrently. Each child is visible and inspectable in Herdr while running, then its tab auto-closes after the result is collected; output is capped at 50KB or 2000 lines.`,
@@ -1175,28 +1182,16 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			"Never pass worker to herdr_subagent; use herdr_async with the worker profile for automatic results or herdr_worker for no-result dispatch.",
 			"If a run reports that the child is blocked, attach with the printed herdr command and answer it rather than retrying the task.",
 		],
-		parameters: Type.Object({
-			agent: Type.String({
-				description: "Named profile from ~/.pi/agent/agents/*.md",
-			}),
-			task: Type.String({
-				description: "The complete task for the child pi process",
-			}),
-			cwd: Type.Optional(
-				Type.String({
-					description: "Working directory. Defaults to the current project.",
-				}),
-			),
-		}),
+		parameters: DelegatedTaskParams,
 
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx, routedProfile?: AgentProfile) {
 			if (!params.task.trim()) throw new Error("Subagent task must not be empty.");
 			if (params.agent.trim().toLowerCase() === WORKER_PROFILE) {
 				throw new Error(
 					"The worker profile is not available to blocking herdr_subagent. Use herdr_async with agent worker for an automatic result, or herdr_worker for no-result dispatch.",
 				);
 			}
-			const profile = await subagentProfiles.get(params.agent);
+			const profile = routedProfile ?? await subagentProfiles.get(params.agent);
 			const autoClose = process.env[EXIT_ON_FINISH_ENV] !== "0";
 			const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
 			const thinking = profile.thinking ?? pi.getThinkingLevel();
@@ -1304,6 +1299,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						details: initialDetails,
 					});
 
+					signal?.throwIfAborted();
 					await herdrOk(pi, ["pane", "run", created.paneId, childCommand]);
 
 					let lastPane = "";
@@ -1469,5 +1465,6 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			}
 			return new Text(text, 0, 0);
 		},
-	});
+	} satisfies ToolDefinition<typeof DelegatedTaskParams>;
+	pi.registerTool(blockingTool);
 }
