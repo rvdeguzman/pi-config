@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const testDir = mkdtempSync(join(tmpdir(), "jev-settings-"));
+after(() => rmSync(testDir, { recursive: true, force: true }));
+let settingsId = 0;
 import { registerAutoDelegation } from "../lib/auto-delegation.ts";
 import type { AgentProfile, ThinkingLevel } from "../lib/subagent-profiles.ts";
 import type { RoutingDecision, RoutingPolicy } from "../lib/jev-routing.ts";
@@ -20,7 +27,7 @@ const profiles: AgentProfile[] = [
 ];
 const positive = (profile = "scout", model = "p/large", thinking: ThinkingLevel = "low"): RoutingDecision => ({ action: "delegate", profile, model, thinking, evidence: [], elapsedMs: 1 });
 
-function harness() {
+function harness(settingsPath = join(testDir, `${settingsId++}.json`)) {
 	const handlers = new Map<string, Array<(...args: any[]) => any>>();
 	const commands = new Map<string, any>();
 	const tools = new Map<string, any>();
@@ -53,6 +60,7 @@ function harness() {
 		ui: { notify: (message: string) => notifications.push(message), setStatus: () => {} },
 	};
 	registerAutoDelegation(pi, {
+		settingsPath,
 		listProfiles: async () => profileList,
 		loadPolicy: async () => { if (failPolicy) throw new Error("bad config"); return structuredClone(config); },
 		apiKey: () => configuredKey,
@@ -69,7 +77,7 @@ function harness() {
 	});
 	const emit = async (event: string) => { for (const handler of handlers.get(event) ?? []) await handler({}, ctx); };
 	return {
-		ctx, routes, dispatched, notifications, emit,
+		ctx, routes, dispatched, notifications, emit, settingsPath,
 		command: (args: string) => commands.get("delegate-auto").handler(args, ctx),
 		run: (params: any = {}, signal?: AbortSignal) => tools.get("herdr_delegate").execute("call-1", { task: "Trace the cross-module flow", ...params }, signal, undefined, ctx),
 		prompt: async () => {
@@ -108,7 +116,7 @@ test("opt-in guidance preserves explicit references and no-bypass policy", async
 	assert.match(h.notifications.at(-1)!, /sent to TypeSafe/);
 });
 
-test("session branch persistence restores on reload/tree; new branch defaults off", async () => {
+test("global choice overrides old branches and persists across new instances", async () => {
 	const h = harness(); await h.command("on");
 	const enabledEntries = structuredClone(h.getBranch());
 	await h.emit("session_start");
@@ -116,9 +124,24 @@ test("session branch persistence restores on reload/tree; new branch defaults of
 	await h.command("off");
 	assert.equal(await h.prompt(), "base");
 	h.setBranch(enabledEntries); await h.emit("session_tree");
-	assert.match(await h.prompt(), /enabled/);
+	assert.equal(await h.prompt(), "base");
 	h.setBranch([]); await h.emit("session_start");
 	assert.equal(await h.prompt(), "base");
+	await h.command("on");
+	assert.equal(JSON.parse(readFileSync(h.settingsPath, "utf8")).enabled, true);
+	const next = harness(h.settingsPath); await next.emit("session_start");
+	assert.match(await next.prompt(), /enabled/);
+	await next.command("off");
+	const third = harness(h.settingsPath); await third.emit("session_start");
+	assert.equal(await third.prompt(), "base");
+});
+
+test("invalid settings fail closed rather than restoring an enabled branch", async () => {
+	const h = harness(); await h.command("on");
+	writeFileSync(h.settingsPath, '{"version":1,"enabled":"true"}');
+	await h.emit("session_start");
+	assert.equal(await h.prompt(), "base");
+	assert.match(h.notifications.at(-1)!, /Invalid\/unreadable/);
 });
 
 test("prepares supported efforts and applies Jev's choice instead of inherited profile/parent effort", async () => {

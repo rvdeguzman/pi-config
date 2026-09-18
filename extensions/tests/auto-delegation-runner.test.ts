@@ -1,12 +1,21 @@
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import test from "node:test";
 import herdrSubagentExtension from "../herdr-subagent.ts";
 
 // Full extension wiring: mocked Jev + mocked Herdr, real profile/policy loading,
 // real private executor handoff and result-file/monitor lifecycle. No live API.
 test("automatic routing launches the chosen model/effort through both runners; explicit dispatch preserves profile defaults", async () => {
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const originalAgentDir = getAgentDir();
+	const isolatedAgentDir = await mkdtemp(join(tmpdir(), "jev-runner-"));
+	await mkdir(join(isolatedAgentDir, "extensions"));
+	await cp(join(originalAgentDir, "agents"), join(isolatedAgentDir, "agents"), { recursive: true });
+	await cp(join(originalAgentDir, "extensions", "herdr-routing.json"), join(isolatedAgentDir, "extensions", "herdr-routing.json"));
+	process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
 	const previousKey = process.env.TYPESAFE_API_KEY;
 	const previousWorkspace = process.env.HERDR_WORKSPACE_ID;
 	const previousFetch = globalThis.fetch;
@@ -98,6 +107,8 @@ test("automatic routing launches the chosen model/effort through both runners; e
 	} finally {
 		for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, ctx);
 		globalThis.fetch = previousFetch;
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(isolatedAgentDir, { recursive: true, force: true });
 		if (previousKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = previousKey;
 		if (previousWorkspace === undefined) delete process.env.HERDR_WORKSPACE_ID; else process.env.HERDR_WORKSPACE_ID = previousWorkspace;
 		if (resultPaths.length) await rm(dirname(dirname(resultPaths[0]!)), { recursive: true, force: true });

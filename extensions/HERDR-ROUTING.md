@@ -6,9 +6,9 @@ Jev decides **whether to dispatch**, **which profile**, and **which execution mo
 
 1. Provide `TYPESAFE_API_KEY` in the environment used to start Pi. Do not paste a key into chat or put it in the routing policy. Restart Pi if its existing process does not have the variable.
 2. Load the extension with `/reload` (or start a new Pi process).
-3. Run `/delegate-auto on` in the session where you want active routing.
+3. Run `/delegate-auto on` once to enable routing and remember the choice globally.
 
-`/delegate-auto status` reports the mode and policy path. `/delegate-auto off` disables routing and cancels in-flight routed calls. Already-dispatched async children retain their normal monitor lifecycle. The setting is stored on the session branch: reload/resume restore it, tree navigation restores that branch's setting, and unrelated new sessions default to off. Children do not register the command or routing tool.
+`/delegate-auto status` reports the mode, settings path, and policy path. `/delegate-auto on|off` saves the choice globally in `~/.pi/agent/jev-delegation.json` (`{"version":1,"enabled":true}`). New sessions, reload/resume, and tree navigation read this file; its choice overrides historical session entries. Already-running sessions keep their current mode until reload or tree navigation. Without the file, legacy branch state is restored (otherwise off); malformed/unreadable settings disable delegation with a warning. `/delegate-auto off` also cancels in-flight routed calls. Already-dispatched async children retain their normal monitor lifecycle. Children do not register the command or routing tool.
 
 **Privacy:** opting in sends the supplied task brief, optional context, profile capability descriptions, and routing policy to `https://api.typesafe.ai/v1/systemone`. The extension does not automatically send your transcript, system prompt, repository contents, or credentials from Pi's auth store. The parent must not include secrets in task/context. Routing evidence is retained in ordinary tool-result details; HTTP bodies and credential headers are not logged by the router.
 

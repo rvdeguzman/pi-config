@@ -1,4 +1,6 @@
-import { join } from "node:path";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import { StringEnum, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
 	getAgentDir,
@@ -22,6 +24,7 @@ export interface DelegatedTask {
 }
 
 interface Dependencies {
+	settingsPath?: string;
 	dispatch(
 		delivery: "async" | "blocking",
 		profile: AgentProfile,
@@ -45,6 +48,7 @@ interface PreparedCandidate {
 
 /** Only global, user-authored policy is read; project content cannot widen routes. */
 export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependencies): void {
+	const settingsPath = dependencies.settingsPath ?? join(getAgentDir(), "jev-delegation.json");
 	const policyPath = join(getAgentDir(), "extensions", "herdr-routing.json");
 	const policyLoader = dependencies.loadPolicy ?? (() => loadRoutingPolicy(policyPath));
 	const listProfiles = dependencies.listProfiles ?? (() => subagentProfiles.list());
@@ -69,6 +73,16 @@ export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependenc
 				if (data?.version === 1 && typeof data.enabled === "boolean") enabled = data.enabled;
 			}
 		}
+		try {
+			const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+			if (settings?.version !== 1 || typeof settings.enabled !== "boolean") throw new Error("Invalid settings");
+			enabled = settings.enabled;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				enabled = false;
+				ctx.ui.notify(`Invalid/unreadable Jev settings; delegation disabled: ${settingsPath}`, "warning");
+			}
+		}
 		if (ctx.hasUI) ctx.ui.setStatus(STATE_TYPE, enabled ? "Jev delegation: on" : undefined);
 	}
 
@@ -81,7 +95,7 @@ export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependenc
 	});
 
 	pi.registerCommand("delegate-auto", {
-		description: "Opt into Jev dispatch/profile/model/effort routing for this session; sends task briefs to TypeSafe. on | off | status",
+		description: "Opt into Jev dispatch/profile/model/effort routing; remembers on/off globally; sends task briefs to TypeSafe. on | off | status",
 		getArgumentCompletions: (prefix) => ["on", "off", "status"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
 		handler: async (args, ctx) => {
 			const action = args.trim().toLowerCase() || "status";
@@ -93,10 +107,20 @@ export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependenc
 			if (action !== "status") {
 				cancelRequests();
 				enabled = action === "on";
+				const temporary = `${settingsPath}.${randomUUID()}.tmp`;
+				try {
+					mkdirSync(dirname(settingsPath), { recursive: true });
+					writeFileSync(temporary, JSON.stringify({ version: 1, enabled }, null, 2) + "\n", { mode: 0o600 });
+					renameSync(temporary, settingsPath);
+				} catch {
+					ctx.ui.notify(`Jev choice applies only to this session: could not save ${settingsPath}`, "error");
+				} finally {
+					rmSync(temporary, { force: true });
+				}
 				pi.appendEntry(STATE_TYPE, { version: 1, enabled });
 				if (ctx.hasUI) ctx.ui.setStatus(STATE_TYPE, enabled ? "Jev delegation: on" : undefined);
 			}
-			ctx.ui.notify(`Jev delegation: ${enabled ? "on — task briefs/context are sent to TypeSafe; uncertain decisions stay in the parent" : "off"}. Policy: ${policyPath}`, "info");
+			ctx.ui.notify(`Jev delegation: ${enabled ? "on — task briefs/context are sent to TypeSafe; uncertain decisions stay in the parent" : "off"}. Settings: ${settingsPath}. Policy: ${policyPath}`, "info");
 		},
 	});
 
