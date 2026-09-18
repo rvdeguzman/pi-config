@@ -1,9 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { ThinkingLevel } from "./subagent-profiles.ts";
-
-/** Jev is a decision service, not a Pi chat-model provider. */
-export const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-const MAX_RESPONSE_BYTES = 128_000;
+import { MAX_CHOICES, routingClientFor, routingFailureReason, type ChoiceAnswer, type ChoiceRequest, type RoutingOptions } from "./typesafe-client.ts";
+export { ENDPOINT, parseChoice, withAbort } from "./typesafe-client.ts";
 export const MAX_TASK_CHARS = 24_000;
 
 export const EFFORT_GUIDANCE: Record<ThinkingLevel, string> = {
@@ -42,13 +40,6 @@ export interface RoutingTask {
 	agent?: string;
 	delivery: "async" | "blocking";
 	allowWrites: boolean;
-}
-
-interface ChoiceAnswer {
-	type: "choice";
-	choice: string;
-	confidence: number;
-	probabilities: Record<string, number>;
 }
 
 export interface RoutingEvidence {
@@ -112,60 +103,11 @@ export async function loadRoutingPolicy(file: string): Promise<RoutingPolicy> {
 	return parseRoutingPolicy(JSON.parse(await readFile(file, "utf8")));
 }
 
-export function parseChoice(value: unknown, labels: string[]): ChoiceAnswer {
-	if (!record(value) || value.type !== "choice" || typeof value.choice !== "string" ||
-		!labels.includes(value.choice) || !fraction(value.confidence) || !record(value.probabilities)) {
-		throw new Error("Invalid Jev choice response.");
-	}
-	const probabilities = value.probabilities;
-	if (Object.keys(probabilities).length !== labels.length || labels.some((label) => !fraction(probabilities[label]))) {
-		throw new Error("Jev returned an invalid probability distribution.");
-	}
-	const values = labels.map((label) => probabilities[label] as number);
-	if (Math.abs(values.reduce((sum, p) => sum + p, 0) - 1) > 0.01 ||
-		(probabilities[value.choice] as number) + 0.000001 < Math.max(...values)) {
-		throw new Error("Jev returned an inconsistent choice.");
-	}
-	return value as unknown as ChoiceAnswer;
-}
-
-export async function readResponse(response: Response): Promise<unknown> {
-	if (!response.body) throw new Error("Empty Jev response.");
-	const reader = response.body.getReader();
-	const decoder = new TextDecoder();
-	let size = 0;
-	let text = "";
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			size += value.byteLength;
-			if (size > MAX_RESPONSE_BYTES) throw new Error("Jev response exceeded the size limit.");
-			text += decoder.decode(value, { stream: true });
-		}
-		text += decoder.decode();
-		return JSON.parse(text);
-	} finally {
-		await reader.cancel().catch(() => undefined);
-		reader.releaseLock();
-	}
-}
-
-/** A hard deadline also bounds injected transports that do not cooperate with abort. */
-export function withAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-	return new Promise((resolve, reject) => {
-		const abort = () => reject(new Error("Jev routing cancelled or timed out."));
-		signal.addEventListener("abort", abort, { once: true });
-		if (signal.aborted) abort();
-		work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
-	});
-}
-
 export async function decideRoute(
 	policy: RoutingPolicy,
 	task: RoutingTask,
 	candidates: RouteCandidate[],
-	options: { apiKey?: string; signal?: AbortSignal; fetch?: typeof fetch } = {},
+	options: RoutingOptions = {},
 ): Promise<RoutingDecision> {
 	const started = Date.now();
 	const evidence: RoutingEvidence[] = [];
@@ -173,8 +115,10 @@ export async function decideRoute(
 	if (!task.task.trim()) return parent("Task is empty.");
 	if (task.task.length + (task.context?.length ?? 0) > MAX_TASK_CHARS) return parent("Task/context exceeds the routing size limit; keep it in the parent or narrow it.");
 	const eligible = candidates.filter((candidate) => candidate.models.length && (!task.agent || candidate.profile === task.agent));
-	if (!eligible.length || eligible.length > 254) return parent("No eligible routing candidates (or too many profiles).");
-	if (!options.apiKey?.trim()) return parent("TYPESAFE_API_KEY is not configured.");
+	if (!eligible.length || eligible.length > MAX_CHOICES) return parent("No eligible routing candidates (or too many profiles).");
+	const client = routingClientFor(options);
+	const credentials = client.credentials();
+	if (!credentials.available) return parent(credentials.reason);
 	if (options.signal?.aborted) return parent("Routing cancelled.");
 
 	const deadline = new AbortController();
@@ -182,31 +126,10 @@ export async function decideRoute(
 	const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
 	const confident = (answer: ChoiceAnswer) => answer.confidence >= policy.minConfidence &&
 		answer.probabilities[answer.choice]! >= policy.minProbability;
-	const ask = async (questions: Record<string, { type: "choice"; instructions: string; criteria: Record<string, string> }>, state: unknown) => {
-		signal.throwIfAborted();
-		const work = (async () => {
-			const response = await (options.fetch ?? fetch)(ENDPOINT, {
-				method: "POST",
-				headers: { Authorization: `Bearer ${options.apiKey}`, "Content-Type": "application/json" },
-				body: JSON.stringify({ model: policy.model, state, questions }),
-				signal,
-				redirect: "error",
-			});
-			if (!response.ok) {
-				await response.body?.cancel();
-				throw new Error(`Jev HTTP ${response.status}.`);
-			}
-			const value = await readResponse(response);
-			signal.throwIfAborted();
-			if (!record(value) || !record(value.answers)) throw new Error("Invalid Jev response.");
-			const answers: Record<string, ChoiceAnswer> = {};
-			for (const [name, question] of Object.entries(questions)) {
-				answers[name] = parseChoice(value.answers[name], Object.keys(question.criteria));
-				evidence.push({ stage: name, ...answers[name] });
-			}
-			return answers;
-		})();
-		return withAbort(work, signal);
+	const ask = async (questions: ChoiceRequest["questions"], state: ChoiceRequest["state"]) => {
+		const answers = await client.evaluate({ model: policy.model, state, questions }, { signal, timeoutMs: policy.timeoutMs });
+		for (const [stage, answer] of Object.entries(answers)) evidence.push({ stage, ...answer });
+		return answers;
 	};
 
 	try {
@@ -243,7 +166,7 @@ export async function decideRoute(
 			`${candidate.id}:${thinking}`,
 			{ model: candidate.id, thinking, description: `${candidate.description} Effort: ${thinking}. ${EFFORT_GUIDANCE[thinking]}` },
 		] as const)));
-		if (!executions.size || executions.size > 254) return parent("No eligible model/effort pairs (or too many choices).");
+		if (!executions.size || executions.size > MAX_CHOICES) return parent("No eligible model/effort pairs (or too many choices).");
 		let execution = executions.values().next().value!;
 		if (executions.size > 1) {
 			const result = await ask({
@@ -258,11 +181,11 @@ export async function decideRoute(
 		}
 		signal.throwIfAborted();
 		return { action: "delegate", profile: selected.profile, model: execution.model, thinking: execution.thinking, evidence, elapsedMs: Date.now() - started };
-	} catch {
-		// Never echo response bodies, request headers, task contents, or provider errors.
-		return parent(signal.aborted ? "Routing cancelled or timed out." : "Jev routing failed or returned an invalid decision.");
+	} catch (error) {
+		return parent(signal.aborted ? "Routing cancelled or timed out." : routingFailureReason(error));
 	} finally {
 		clearTimeout(timer);
 		deadline.abort();
+		if (!options.client) client.reset();
 	}
 }

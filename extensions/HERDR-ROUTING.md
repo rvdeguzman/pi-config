@@ -4,9 +4,12 @@ Jev decides **whether to dispatch**, **which profile**, and **which execution mo
 
 ## Enable
 
-1. Provide `TYPESAFE_API_KEY` in the environment used to start Pi. Do not paste a key into chat or put it in the routing policy. Restart Pi if its existing process does not have the variable.
-2. Load the extension with `/reload` (or start a new Pi process).
-3. Run `/delegate-auto on` once to enable routing and remember the choice globally.
+1. Install the pinned local client dependency with `make -C extensions/tests install-deps` from this checkout. A global `pi install` alone does not make dependencies importable from local extensions.
+2. Provide `TYPESAFE_API_KEY` in Pi's environment, or use `/typesafe login` from the separately installed `pi-typesafe` package. The environment takes precedence over the owner-only login store. Do not paste a key into chat or the routing policy.
+3. Load the extension with `/reload` (or start a new Pi process).
+4. Run `/delegate-auto on` once to enable routing and remember the choice globally.
+
+Routing uses the public `pi-typesafe@0.5.0` client through [a guarded shared adapter](TYPESAFE-CLIENT.md). `/typesafe enable|disable` controls only that package's general-purpose tool, **not** this router. `/delegate-auto status` includes credential availability, this router's session usage estimate, and its last sanitized client failure. A configured key is not a claim that the service accepted it.
 
 `/delegate-auto status` reports the mode, settings path, and policy path. `/delegate-auto on|off` saves the choice globally in `~/.pi/agent/jev-delegation.json` (`{"version":1,"enabled":true}`). New sessions, reload/resume, and tree navigation read this file; its choice overrides historical session entries. Already-running sessions keep their current mode until reload or tree navigation. Without the file, legacy branch state is restored (otherwise off); malformed/unreadable settings disable delegation with a warning. `/delegate-auto off` also cancels in-flight routed calls. Already-dispatched async children retain their normal monitor lifecycle. Children do not register the command or routing tool.
 
@@ -69,13 +72,17 @@ Edit `~/.pi/agent/extensions/herdr-routing.json`. It is loaded on each routed ca
 - `minConfidence`: initially 0.8.
 - `minProbability`: initially 0.7 for the selected option. Both thresholds must pass at every decision stage.
 
+Requests are also limited to 64 Choice labels and 64 KiB of full UTF-8 JSON by the package. The existing 24,000-character task/context guard still applies; oversized payloads or expanded choices stay in the parent. The adapter retains our 128,000-byte response limit, rejects redirects, and validates probability sums and the selected maximum.
+
+There is no new implicit 20-attempt session routing cap: existing routing was uncapped. Package `PI_TYPESAFE_MAX_*` daily caps are honored, but its 0.5.0 ledger is best-effort and can lose counts across separate clients/processes. Do not treat it as a hard account-wide spending limit. See [client lifecycle and budget semantics](TYPESAFE-CLIENT.md).
+
 The supplied Luna/Sol/Astra rubrics are **initial preferences, not benchmarked capability guarantees**. Tune them and the thresholds against actual completion quality, rework, and latency. Jev confidence describes its distribution, not a measured probability that a child will succeed. `jev-latest` can change upstream; pin a supported Jev version if reproducibility is needed.
 
 The sidecar is an explicit opt-in model-routing allowlist. Existing `agents/*.md` `model` strings/arrays keep their direct-dispatch meaning. Ordered provider-failure fallback in the direct blocking runner is not repurposed as routing. A routed call uses its one approved model; it does not silently advance to unapproved fallback models.
 
 ## Verification
 
-Run `make -C extensions/tests test`. The Makefile uses Pi's sibling Node executable and resolves its installed extension dependencies without installing packages into this config checkout. `NODE`, `NODE_TYPE_FLAGS`, and `PI_TEST_ENTRY` can be overridden for other installations. On macOS, a pending Xcode license can prevent `/usr/bin/make` from starting; select an already-installed Command Line Tools developer directory if appropriate.
+Run `make -C extensions/tests test`. Run `make -C extensions/tests install-deps` first in a fresh checkout. The Makefile uses Pi's sibling Node executable, the pinned dependency under `extensions/node_modules`, and Pi's installed host APIs. Tests use a disposable agent directory and blocked-by-default networking so fake requests cannot overwrite live credentials or usage. `NODE`, `NODE_TYPE_FLAGS`, and `PI_TEST_ENTRY` can be overridden for other installations. On macOS, a pending Xcode license can prevent `/usr/bin/make` from starting; select an already-installed Command Line Tools developer directory if appropriate.
 
 Tests cover fail-closed classification, bounded network calls, malformed distributions, authorization/scope filtering, all supported efforts, unsupported/pinned effort rejection, persisted opt-in state, cancellation/revalidation races, explicit-request bypass, child tool stripping, and model/effort propagation through both runner launch paths with mocked Jev/Herdr. They do not validate live Jev credentials or classifier quality.
 

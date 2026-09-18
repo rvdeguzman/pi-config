@@ -29,7 +29,7 @@ function transport(choices: Record<string, string> = {}) {
 		assert.equal((options?.headers as any).Authorization, "Bearer secret-test-key");
 		const request = JSON.parse(options!.body as string);
 		calls.push(request);
-		const payload = { answers: Object.fromEntries(Object.entries(request.questions).map(([name, question]: [string, any]) => [name, answer(Object.keys(question.criteria), choices[name] ?? ({ dispatch: "delegate", profile: "scout", execution: "provider/large:high" } as any)[name])])) };
+		const payload = { model: "jev-latest", usage: { input_tokens: 10, output_tokens: 0 }, answers: Object.fromEntries(Object.entries(request.questions).map(([name, question]: [string, any]) => [name, answer(Object.keys(question.criteria), choices[name] ?? ({ dispatch: "delegate", profile: "scout", execution: "provider/large:high" } as any)[name])])) };
 		mutate?.(payload, request);
 		return Response.json(payload);
 	};

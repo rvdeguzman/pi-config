@@ -44,7 +44,7 @@ test("automatic routing launches the chosen model/effort through both runners; e
 	globalThis.fetch = async (_url, init) => {
 		requests++;
 		const request = JSON.parse(init!.body as string);
-		return Response.json({ answers: Object.fromEntries(Object.entries(request.questions).map(([name, question]: [string, any]) => {
+		return Response.json({ model: "jev-latest", usage: { input_tokens: 10, output_tokens: 0 }, answers: Object.fromEntries(Object.entries(request.questions).map(([name, question]: [string, any]) => {
 			const choice = name === "dispatch" ? "delegate" : name === "profile" ? "scout" : `openai-codex/gpt-5.6-sol:${executionEffort}`;
 			const labels = Object.keys(question.criteria);
 			return [name, { type: "choice", choice, confidence: 0.99, probabilities: Object.fromEntries(labels.map((label) => [label, label === choice ? 0.99 : 0.01 / (labels.length - 1)])) }];

@@ -3,7 +3,13 @@ NODE ?= $(dir $(PI_TEST_ENTRY))node
 NODE_TYPE_FLAGS ?= --experimental-transform-types
 export PI_TEST_ENTRY
 
-.PHONY: test test-extensions smoke
+NPM := $(dir $(NODE))npm
+.DEFAULT_GOAL := test
+
+.PHONY: install-deps test test-extensions smoke
+
+install-deps:
+	cd .. && PATH="$(dir $(NODE)):$$PATH" $(NPM) ci --ignore-scripts
 
 test: test-extensions
 
@@ -11,4 +17,4 @@ test-extensions:
 	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/*.test.ts extensions/openai-codex-priority/test.mjs
 
 smoke:
-	cd ../.. && PI_OFFLINE=1 $(NODE) --import ./extensions/tests/register-pi.mjs --input-type=module -e 'import assert from "node:assert/strict"; import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent"; const loader = new DefaultResourceLoader({ cwd: process.cwd(), agentDir: getAgentDir() }); await loader.reload(); const result = loader.getExtensions(); assert.deepEqual(result.errors, []); for (const extension of result.extensions) console.log(extension.path, [...extension.commands.keys()].map(name => "/" + name).join(" "));'
+	cd ../.. && PI_OFFLINE=1 $(NODE) --import ./extensions/tests/register-pi.mjs ./extensions/tests/smoke.mjs

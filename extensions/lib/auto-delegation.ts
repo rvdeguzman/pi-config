@@ -13,6 +13,7 @@ import {
 import { Type } from "typebox";
 import { subagentProfiles, type AgentProfile } from "./subagent-profiles.ts";
 import { decideRoute, loadRoutingPolicy, MAX_TASK_CHARS, type RouteCandidate, type RoutingDecision, type RoutingPolicy } from "./jev-routing.ts";
+import { createRoutingClient, type RoutingClient } from "./typesafe-client.ts";
 
 const STATE_TYPE = "delegate-auto";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "web_search_exa", "web_fetch_exa", "deep_search_exa"]);
@@ -39,6 +40,7 @@ interface Dependencies {
 	loadPolicy?: () => Promise<RoutingPolicy>;
 	route?: typeof decideRoute;
 	apiKey?: () => string | undefined;
+	client?: RoutingClient;
 }
 
 interface PreparedCandidate {
@@ -52,7 +54,7 @@ export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependenc
 	const policyPath = join(getAgentDir(), "extensions", "herdr-routing.json");
 	const policyLoader = dependencies.loadPolicy ?? (() => loadRoutingPolicy(policyPath));
 	const listProfiles = dependencies.listProfiles ?? (() => subagentProfiles.list());
-	const apiKey = dependencies.apiKey ?? (() => process.env.TYPESAFE_API_KEY);
+	const client = dependencies.client ?? createRoutingClient({ apiKey: dependencies.apiKey });
 	let enabled = false;
 	let stopped = false;
 	let generation = 0;
@@ -86,9 +88,9 @@ export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependenc
 		if (ctx.hasUI) ctx.ui.setStatus(STATE_TYPE, enabled ? "Jev delegation: on" : undefined);
 	}
 
-	pi.on("session_start", (_event, ctx) => { stopped = false; restore(ctx); });
+	pi.on("session_start", (_event, ctx) => { client.reset(); stopped = false; restore(ctx); });
 	pi.on("session_tree", (_event, ctx) => restore(ctx));
-	pi.on("session_shutdown", () => { stopped = true; cancelRequests(); });
+	pi.on("session_shutdown", () => { stopped = true; cancelRequests(); client.reset(); });
 	pi.on("before_agent_start", (event) => {
 		if (!enabled) return;
 		return { systemPrompt: event.systemPrompt + "\n\nJev auto-delegation is enabled. For a potentially worthwhile bounded subtask, write a complete brief and use herdr_delegate BEFORE dispatching it. Jev decides whether to keep it in the parent, then chooses an eligible profile/model/effort. Supply dependencies and potential overlapping writes in context. An optional agent pins the profile, not the dispatch decision. allowWrites must be true only for user-authorized implementation work. If herdr_delegate returns parent, do the work yourself; do not bypass the decision by retrying through another delegation tool. Explicit &name requests remain direct herdr_async calls with that profile and bypass Jev. The parent still chooses task boundaries, number/order of calls, and async versus blocking delivery. Never use automatic fire-and-forget dispatch." };
@@ -101,7 +103,8 @@ export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependenc
 			const action = args.trim().toLowerCase() || "status";
 			if (!["on", "off", "status"].includes(action)) { ctx.ui.notify("Usage: /delegate-auto on|off|status", "warning"); return; }
 			if (action === "on") {
-				if (!apiKey()?.trim()) { ctx.ui.notify("Set TYPESAFE_API_KEY in Pi's environment first. Do not paste the key into chat.", "error"); return; }
+				const credentials = client.credentials();
+				if (!credentials.available) { ctx.ui.notify(credentials.reason, "error"); return; }
 				try { await policyLoader(); } catch { ctx.ui.notify(`Invalid/missing routing policy: ${policyPath}`, "error"); return; }
 			}
 			if (action !== "status") {
@@ -120,7 +123,7 @@ export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependenc
 				pi.appendEntry(STATE_TYPE, { version: 1, enabled });
 				if (ctx.hasUI) ctx.ui.setStatus(STATE_TYPE, enabled ? "Jev delegation: on" : undefined);
 			}
-			ctx.ui.notify(`Jev delegation: ${enabled ? "on — task briefs/context are sent to TypeSafe; uncertain decisions stay in the parent" : "off"}. Settings: ${settingsPath}. Policy: ${policyPath}`, "info");
+			ctx.ui.notify(`Jev delegation: ${enabled ? "on — task briefs/context are sent to TypeSafe; uncertain decisions stay in the parent" : "off"}. Settings: ${settingsPath}. Policy: ${policyPath}\n${client.status()}`, "info");
 		},
 	});
 
@@ -196,7 +199,7 @@ export function registerAutoDelegation(pi: ExtensionAPI, dependencies: Dependenc
 					agent: params.agent ? prepared[0]?.profile.name ?? params.agent : undefined,
 					delivery,
 					allowWrites: params.allowWrites ?? false,
-				}, prepared.map(({ candidate }) => candidate), { apiKey: apiKey(), signal: combinedSignal });
+				}, prepared.map(({ candidate }) => candidate), { client, signal: combinedSignal });
 				if (decision.action === "parent") return retained(decision.reason, decision);
 				if (cancelled() || !toolsEnabled()) return retained("Routing cancelled or delegation disabled before launch.", decision);
 				// Re-read configuration, tools, and scope after network I/O. Never trust stale eligibility.
