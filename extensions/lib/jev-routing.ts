@@ -2,11 +2,11 @@ import { readFile } from "node:fs/promises";
 import type { ThinkingLevel } from "./subagent-profiles.ts";
 
 /** Jev is a decision service, not a Pi chat-model provider. */
-const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+export const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const MAX_RESPONSE_BYTES = 128_000;
 export const MAX_TASK_CHARS = 24_000;
 
-const EFFORT_GUIDANCE: Record<ThinkingLevel, string> = {
+export const EFFORT_GUIDANCE: Record<ThinkingLevel, string> = {
 	off: "No explicit reasoning effort; suitable when the task does not benefit from additional deliberation.",
 	minimal: "Smallest reasoning budget; prefer for straightforward tasks with little ambiguity.",
 	low: "Light reasoning for routine, well-specified work.",
@@ -129,7 +129,7 @@ export function parseChoice(value: unknown, labels: string[]): ChoiceAnswer {
 	return value as unknown as ChoiceAnswer;
 }
 
-async function readResponse(response: Response): Promise<unknown> {
+export async function readResponse(response: Response): Promise<unknown> {
 	if (!response.body) throw new Error("Empty Jev response.");
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
@@ -152,7 +152,7 @@ async function readResponse(response: Response): Promise<unknown> {
 }
 
 /** A hard deadline also bounds injected transports that do not cooperate with abort. */
-function withAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+export function withAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
 	return new Promise((resolve, reject) => {
 		const abort = () => reject(new Error("Jev routing cancelled or timed out."));
 		signal.addEventListener("abort", abort, { once: true });

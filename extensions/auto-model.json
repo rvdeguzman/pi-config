@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "model": "jev-latest",
+  "timeoutMs": 2500,
+  "minConfidence": 0.8,
+  "minProbability": 0.7,
+  "objective": "Balance correctness and speed. Prefer the lightest model and lowest reasoning effort adequate for the complete request. Reserve heavier execution for genuinely difficult work. Retain the current execution when context is missing or uncertain. These rubrics are initial preferences, not benchmarked capability guarantees.",
+  "models": [
+    { "id": "openai-codex/gpt-5.6-luna", "description": "Starting preference for straightforward factual questions, targeted lookups, and mechanical localized edits with clear verification." },
+    { "id": "openai-codex/gpt-5.6-sol", "description": "Preference for ordinary feature implementation, multi-file bug fixes, tests, cross-module investigation, and synthesis." },
+    { "id": "openai-codex/gpt-6-astra", "description": "Reserve for unusually difficult architecture, concurrency, subtle correctness constraints, or deep reasoning across interacting systems; not merely because a task involves code." }
+  ]
+}

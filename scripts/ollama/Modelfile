@@ -1,0 +1,5 @@
+# Reuses the downloaded weights; no second model download.
+FROM qwen3.5:9b
+# Bound the KV cache for this 16 GB Mac; keep Pi's contextWindow in sync.
+PARAMETER num_ctx 32768
+PARAMETER num_predict 4096

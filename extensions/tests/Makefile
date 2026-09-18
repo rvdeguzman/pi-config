@@ -8,4 +8,4 @@ export PI_TEST_ENTRY
 test: test-extensions
 
 test-extensions:
-	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/herdr-subagent.test.ts extensions/tests/subagent-profiles.test.ts extensions/tests/agent-ref-autocomplete.test.ts extensions/tests/plan-mode.test.ts extensions/tests/todo-integration.test.ts extensions/tests/jev-routing.test.ts extensions/tests/auto-delegation.test.ts extensions/tests/auto-delegation-runner.test.ts
+	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/herdr-subagent.test.ts extensions/tests/subagent-profiles.test.ts extensions/tests/agent-ref-autocomplete.test.ts extensions/tests/plan-mode.test.ts extensions/tests/todo-integration.test.ts extensions/tests/jev-routing.test.ts extensions/tests/auto-delegation.test.ts extensions/tests/auto-delegation-runner.test.ts extensions/tests/auto-model.test.ts
