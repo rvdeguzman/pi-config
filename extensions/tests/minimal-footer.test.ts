@@ -54,11 +54,11 @@ test("renders the footer without cost", () => {
 		getContextUsage: () => ({ tokens: 84_864, contextWindow: 272_000, percent: 31.2 }),
 	};
 
-	const left = "ch98.3% 85k/272k 31.2% rwx";
+	const left = "ch98.3% 85k/272k 31.2%";
 	const right = "gpt-5.6-sol fast xhigh";
 	const top = `~/.pi/agent${formatGitSuffix(ctx.cwd, "master")}`;
 
-	assert.deepEqual(formatFooter(ctx as never, 100, true, "", "master", "rwx"), [
+	assert.deepEqual(formatFooter(ctx as never, 100, true, "", "master"), [
 		top + " ".repeat(100 - visibleWidth(top) - visibleWidth(right)) + right,
 		left,
 	]);

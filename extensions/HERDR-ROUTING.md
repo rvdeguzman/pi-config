@@ -53,7 +53,7 @@ An explicit scoped thinking pin restricts that model to the pinned level. If the
 
 Jev chooses the pair jointly, with instructions to prefer the lowest effort adequate for correctness and reserve extra-high/maximum effort for tasks that justify the additional compute/latency. The selected pair must remain eligible at launch. Routing never changes profile files, Pi defaults, or the parent's model/effort.
 
-Without write authorization, tools must all be in the conservative read-only set (`read`, `grep`, `find`, `ls`, and the three Exa search/fetch tools). Unknown/SDK-only tools exclude the profile. This means the current researcher profile is unavailable unless its Exa tools are registered. All four delegation tools are stripped from children. Plan mode disables and blocks every delegation entry point, including queued `herdr_async` and `herdr_delegate` calls.
+Without write authorization, tools must all be in the conservative read-only set (`read`, `grep`, `find`, `ls`, and the three Exa search/fetch tools). Unknown/SDK-only tools exclude the profile. This means the current researcher profile is unavailable unless its Exa tools are registered. All four delegation tools are stripped from children.
 
 Children still share their selected checkout; routing is not worktree isolation. The parent must coordinate file ownership and disclose overlapping writes/dependencies in the task context.
 
@@ -77,6 +77,6 @@ The sidecar is an explicit opt-in model-routing allowlist. Existing `agents/*.md
 
 Run `make -C extensions/tests test`. The Makefile uses Pi's sibling Node executable and resolves its installed extension dependencies without installing packages into this config checkout. `NODE`, `NODE_TYPE_FLAGS`, and `PI_TEST_ENTRY` can be overridden for other installations. On macOS, a pending Xcode license can prevent `/usr/bin/make` from starting; select an already-installed Command Line Tools developer directory if appropriate.
 
-Tests cover fail-closed classification, bounded network calls, malformed distributions, authorization/scope filtering, all supported efforts, unsupported/pinned effort rejection, persisted opt-in state, cancellation/revalidation races, explicit-request bypass, child tool stripping, plan-mode gates, and model/effort propagation through both runner launch paths with mocked Jev/Herdr. They do not validate live Jev credentials or classifier quality.
+Tests cover fail-closed classification, bounded network calls, malformed distributions, authorization/scope filtering, all supported efforts, unsupported/pinned effort rejection, persisted opt-in state, cancellation/revalidation races, explicit-request bypass, child tool stripping, and model/effort propagation through both runner launch paths with mocked Jev/Herdr. They do not validate live Jev credentials or classifier quality.
 
 Sources: [HTTP API](https://docs.typesafe.ai/api), [confidence semantics](https://docs.typesafe.ai/confidence), [independent questions/state](https://docs.typesafe.ai/concepts/state).

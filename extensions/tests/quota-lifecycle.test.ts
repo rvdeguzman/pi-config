@@ -23,6 +23,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 const STALE_MESSAGE =
 	"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().";
@@ -100,9 +101,9 @@ async function harness() {
 		},
 		fire: async (evt: string) => {
 			for (const h of handlers.get(evt) ?? []) await h({ type: evt }, ctx);
-			await new Promise((r) => realSetInterval.call(globalThis, r, 50));
+			await delay(50);
 		},
-		settle: () => new Promise((r) => realSetInterval.call(globalThis, r, 50)),
+		settle: () => delay(50),
 		restore: () => {
 			globalThis.setInterval = realSetInterval;
 			globalThis.clearInterval = realClearInterval;
