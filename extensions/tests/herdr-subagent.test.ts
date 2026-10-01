@@ -73,10 +73,7 @@ function harness(herdr: FakeHerdr, options: { sessionId?: string; cwd?: string; 
 		"ls",
 		"bash",
 		"herdr_subagent",
-		"herdr_worker",
 		"herdr_async",
-		"herdr_send",
-		"herdr_interrupt",
 	];
 	const pi = {
 		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
@@ -171,19 +168,6 @@ test("result text exposes errors, run ids, and hides stale commands once auto-cl
 	assert.doesNotMatch(closed, /Attach:|Capture:|Clean up:/);
 });
 
-test("worker children do not register delegation tools", () => {
-	const previous = process.env.PI_HERDR_WORKER_CHILD;
-	process.env.PI_HERDR_WORKER_CHILD = "1";
-	const registered: string[] = [];
-	try {
-		herdrSubagentExtension({ registerTool: (definition: { name: string }) => registered.push(definition.name) } as any);
-		assert.deepEqual(registered, []);
-	} finally {
-		if (previous === undefined) delete process.env.PI_HERDR_WORKER_CHILD;
-		else process.env.PI_HERDR_WORKER_CHILD = previous;
-	}
-});
-
 test("the extensions tools token grants every active extension tool, but never delegation tools", () => {
 	const builtin = (name: string) => ({ name, exposure: "direct", sourceInfo: { path: `builtin:${name}`, source: "builtin" } });
 	const fromExtension = (name: string, exposure = "direct") => ({
@@ -232,44 +216,18 @@ test("all explicit agent references route through async Herdr, including worker"
 	const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {});
 	assert.match(prompt.systemPrompt, /Route every valid &name through herdr_async, including &worker/);
 	assert.match(prompt.systemPrompt, /herdr_subagent only for a parent-selected blocking dependency/);
-	assert.match(prompt.systemPrompt, /herdr_worker only when no automatic result is wanted/);
-	assert.match(prompt.systemPrompt, /herdr_send/);
+	assert.doesNotMatch(prompt.systemPrompt, /herdr_worker|herdr_send|herdr_interrupt/);
 
 	assert.match(tools.get("herdr_async").promptGuidelines.join("\n"), /every explicit &name.*including &worker/);
-	assert.match(tools.get("herdr_worker").promptGuidelines.join("\n"), /no automatic completion result/);
 	const subagent = tools.get("herdr_subagent");
 	assert.match(subagent.description, /Available blocking profiles:/);
 	assert.doesNotMatch(subagent.description, /Available blocking profiles:[^.]*worker/);
-	assert.ok(tools.get("herdr_send"));
-	assert.ok(tools.get("herdr_interrupt"));
+	assert.deepEqual([...tools.keys()].sort(), ["herdr_async", "herdr_subagent"]);
 	await assert.rejects(
 		subagent.execute("blocking-worker", { agent: "WoRkEr", task: "implement it" }, undefined, undefined, {}),
-		/worker profile is not available.*Use herdr_async.*herdr_worker/s,
+		/worker profile is not available.*Use herdr_async/s,
 	);
 	assert.equal(execCalled, false);
-});
-
-test("herdr_worker launches through agent start and returns without polling", async () => {
-	const herdr = createFakeHerdr({ onPrompt: () => undefined });
-	const { tools, ctx } = harness(herdr, { toolNames: ["read", "herdr_subagent", "herdr_worker"] });
-	const result = await tools.get("herdr_worker").execute("worker-1", { task: "implement the focused fix" }, undefined, undefined, ctx);
-
-	assert.match(result.content[0].text, /Worker dispatched/);
-	assert.match(result.content[0].text, /herdr tab focus w1:t1/);
-	const launch = herdr.launches[0]!;
-	assert.equal(launch.env.PI_HERDR_WORKER_CHILD, "1");
-	assert.equal(launch.env.PI_HERDR_SUBAGENT_RESULT, undefined);
-	assert.equal(launch.prompt?.startsWith("implement the focused fix"), true);
-	assert.doesNotMatch(launch.argv!.join(" "), /herdr_subagent|herdr_worker/);
-	assert.deepEqual(
-		herdr.calls.map((args) => args.slice(0, 2)),
-		[
-			["workspace", "create"],
-			["agent", "start"],
-			["agent", "prompt"],
-		],
-		"dispatch must return without pane, agent, or result-file polling",
-	);
 });
 
 test("herdr_async returns immediately and steers eventual completion or failure into the parent", async () => {
@@ -399,67 +357,6 @@ test("sibling subagent calls run concurrently and auto-close independently", asy
 	]);
 	assert.equal(maximum, 2);
 	assert.deepEqual(herdr.closedTabs.sort(), ["w1:t1", "w2:t1"]);
-});
-
-test("herdr_interrupt sends Escape to a live run and its partial result is delivered", async () => {
-	const herdr = createFakeHerdr({
-		onPrompt: () => undefined, // keeps working until interrupted
-		onKeys: (launch, keys, fake) => {
-			if (keys.includes("esc")) {
-				void fake.complete(launch, { status: "failed", output: "partial", stopReason: "aborted", error: "Interrupted.", failureKind: "abort" });
-			}
-		},
-	});
-	const { tools, messages, ctx, handlers } = harness(herdr);
-	try {
-		const dispatched = await tools.get("herdr_async").execute("long", { agent: "scout", task: "long job" }, undefined, undefined, ctx);
-		const runId = dispatched.details.runId as string;
-		const interrupted = await tools.get("herdr_interrupt").execute("stop", { run: runId.slice(0, 8) }, undefined, undefined, ctx);
-		assert.match(interrupted.content[0].text, /Interrupt sent/);
-		assert.deepEqual(herdr.launches[0]!.keys, ["esc"]);
-		await waitFor(() => messages.length === 1);
-		assert.match(messages[0]!.message.content, /failed/);
-		assert.match(messages[0]!.message.content, /Interrupted/);
-		assert.match(messages[0]!.message.content, /partial/);
-		await assert.rejects(
-			tools.get("herdr_interrupt").execute("again", { run: runId }, undefined, undefined, ctx),
-			/is not running/,
-		);
-	} finally {
-		await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
-	}
-});
-
-test("herdr_send resumes a finished run's session with the follow-up message", async () => {
-	const sessionFile = join(agentDir, "child-session.jsonl");
-	await writeFile(sessionFile, "{}\n");
-	const herdr = createFakeHerdr({
-		onPrompt: (launch, fake) =>
-			void setTimeout(() => void fake.complete(launch, { output: `reply to ${launch.prompt}`, sessionFile }), 30),
-	});
-	const { tools, messages, ctx, handlers } = harness(herdr);
-	try {
-		const first = await tools.get("herdr_subagent").execute("first", { agent: "scout", task: "initial" }, undefined, undefined, ctx);
-		const runId = first.details.runId as string;
-		assert.match(first.content[0].text, new RegExp(`Run: ${runId.slice(0, 8)}`));
-
-		const followUp = await tools.get("herdr_send").execute("send", { run: runId.slice(0, 6), task: "now go deeper" }, undefined, undefined, ctx);
-		assert.match(followUp.content[0].text, /continues/);
-		const resumed = herdr.launches[1]!;
-		assert.equal(resumed.argv![resumed.argv!.indexOf("--session") + 1], sessionFile);
-		assert.equal(resumed.argv!.includes("--session-dir"), false);
-		assert.equal(resumed.prompt, "now go deeper");
-		await waitFor(() => messages.length === 1);
-		assert.match(messages[0]!.message.content, /reply to now go deeper/);
-		assert.match(messages[0]!.message.content, /continues/);
-
-		await assert.rejects(
-			tools.get("herdr_send").execute("bad", { run: "zzzz", task: "x" }, undefined, undefined, ctx),
-			/Unknown run/,
-		);
-	} finally {
-		await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
-	}
 });
 
 test("async runs survive /reload: the next extension instance re-attaches and delivers once", async () => {
