@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install the skills used by this dotfiles repo, then update them.
+# Install the global skills this setup uses (into ~/.agents/skills), then update them.
+# Skills tracked in this repo under skills/ are not managed here.
 set -euo pipefail
 
 install() {
@@ -9,16 +10,13 @@ install() {
 }
 
 install mattpocock/skills \
-  ask-matt batch-grill-me code-review codebase-design diagnosing-bugs \
-  domain-modeling grill-me grill-with-docs grilling handoff implement \
-  improve-codebase-architecture research resolving-merge-conflicts \
-  setup-matt-pocock-skills tdd teach to-spec to-tickets triage wayfinder \
-  wizard writing-great-skills
-
-install emilkowalski/skills \
-  animation-vocabulary apple-design emil-design-eng \
-  find-animation-opportunities improve-animations pick-ui-library \
-  prototype review-animations
+  ask-matt claude-handoff code-review codebase-design diagnosing-bugs \
+  domain-modeling handoff implement implement-spec \
+  improve-codebase-architecture loop-me prototype research \
+  resolving-merge-conflicts retro setup-matt-pocock-skills \
+  setup-ts-deep-modules tdd teach to-questionnaire to-spec to-tickets \
+  triage wayfinder wizard writing-beats writing-for-agents \
+  writing-fragments writing-shape
 
 npx --yes skills update --global --yes
 printf 'Skills installed and updated.\n'
