@@ -1,6 +1,6 @@
 ---
 name: researcher
-model: openai/gpt-6.1-sol
+model: anthropic/claude-opus-5-5
 thinking: high
-tools: [read, grep, find, ls, web_search_exa, web_fetch_exa, deep_search_exa]
+tools: [read, grep, find, ls, extensions]
 ---

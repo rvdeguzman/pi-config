@@ -99,6 +99,7 @@ Rules:
 ### Tool resolution
 
 - `tools` is the child's complete active-tool allowlist.
+- The reserved entry `extensions` expands to every extension-registered tool the caller has loaded with `direct` or `model-only` exposure (Pi built-in and SDK tools are excluded), e.g. `tools: [read, grep, find, ls, extensions]`. A real tool named `extensions` takes precedence over the token.
 - A missing `tools` value inherits the caller's active tools, excluding both `herdr_subagent` and `herdr_worker` to prevent recursive delegation.
 - All delegation tools (`herdr_subagent`, `herdr_async`, `herdr_worker`, `herdr_delegate`, `herdr_send`, `herdr_interrupt`) are removed from every child tool allowlist, even if a profile names them explicitly.
 - Unknown tool names are configuration errors and must be reported before launching the child.

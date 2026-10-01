@@ -1,6 +1,6 @@
 ---
 name: scout
-model: anthropic/claude-sonnet-5.5
+model: anthropic/claude-sonnet-5-5
 thinking: high
-tools: [read, grep, find, ls]
+tools: [read, grep, find, ls, extensions]
 ---

@@ -775,8 +775,24 @@ export function isRetryableProviderFailure(value: ChildResult | Error | string):
 	);
 }
 
-function resolveChildTools(pi: ExtensionAPI, requestedTools: string[], profileName: string): string[] {
-	const knownTools = new Map(pi.getAllTools().map((tool) => [tool.name, tool]));
+/** Profile `tools` token that grants every extension-registered tool. */
+export const EXTENSION_TOOLS_TOKEN = "extensions";
+
+/** A tool an extension registered (not a Pi built-in or SDK tool) that is active by default. */
+function isExtensionTool(tool: { name: string; exposure?: string; sourceInfo?: { path?: string; source?: string } }): boolean {
+	const source = tool.sourceInfo;
+	if (!source || source.source === "sdk" || source.path === `builtin:${tool.name}`) return false;
+	return tool.exposure === undefined || tool.exposure === "direct" || tool.exposure === "model-only";
+}
+
+export function resolveChildTools(pi: ExtensionAPI, profileTools: string[], profileName: string): string[] {
+	const allTools = pi.getAllTools();
+	const knownTools = new Map(allTools.map((tool) => [tool.name, tool]));
+	const requestedTools = profileTools.flatMap((name) =>
+		name === EXTENSION_TOOLS_TOKEN && !knownTools.has(name)
+			? allTools.filter(isExtensionTool).map((tool) => tool.name)
+			: [name],
+	);
 	const unknownTools = requestedTools.filter((name) => !knownTools.has(name));
 	if (unknownTools.length > 0) {
 		throw new Error(`Agent profile ${profileName} has unknown tool(s): ${unknownTools.join(", ")}.`);

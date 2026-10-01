@@ -19,7 +19,9 @@ after(async () => {
 	await rm(agentDir, { recursive: true, force: true });
 });
 
-const { default: extensionImpl, herdrOk, isRunDetails, pruneRunDirs, resultText } = await import("../herdr-subagent.ts");
+const { default: extensionImpl, herdrOk, isRunDetails, pruneRunDirs, resolveChildTools, resultText } = await import(
+	"../herdr-subagent.ts"
+);
 const { createFakeHerdr } = await import("./fake-herdr.ts");
 type FakeHerdr = ReturnType<typeof createFakeHerdr>;
 
@@ -173,6 +175,42 @@ test("worker children do not register delegation tools", () => {
 		if (previous === undefined) delete process.env.PI_HERDR_WORKER_CHILD;
 		else process.env.PI_HERDR_WORKER_CHILD = previous;
 	}
+});
+
+test("the extensions tools token grants every active extension tool, but never delegation tools", () => {
+	const builtin = (name: string) => ({ name, exposure: "direct", sourceInfo: { path: `builtin:${name}`, source: "builtin" } });
+	const fromExtension = (name: string, exposure = "direct") => ({
+		name,
+		exposure,
+		sourceInfo: { path: `/ext/${name}.ts`, source: "local" },
+	});
+	const pi = {
+		getAllTools: () => [
+			builtin("read"),
+			builtin("bash"),
+			fromExtension("web_search_exa"),
+			fromExtension("image_generation", "model-only"),
+			fromExtension("hidden_tool", "hidden"),
+			fromExtension("deferred_tool", "deferred"),
+			{ name: "sdk_tool", exposure: "direct", sourceInfo: { path: "<sdk:sdk_tool>", source: "sdk" } },
+			{ name: "mcp_call", exposure: "direct", sourceInfo: { path: "builtin:mcp", source: "builtin" } },
+			fromExtension("herdr_async"),
+			fromExtension("herdr_subagent"),
+		],
+	} as any;
+	assert.deepEqual(resolveChildTools(pi, ["read", "extensions"], "scout"), [
+		"read",
+		"web_search_exa",
+		"image_generation",
+		"mcp_call",
+	]);
+	assert.deepEqual(resolveChildTools(pi, ["extensions", "web_search_exa", "read"], "scout"), [
+		"web_search_exa",
+		"image_generation",
+		"mcp_call",
+		"read",
+	]);
+	assert.throws(() => resolveChildTools(pi, ["read", "nope"], "scout"), /unknown tool\(s\): nope/);
 });
 
 test("all explicit agent references route through async Herdr, including worker", async () => {
