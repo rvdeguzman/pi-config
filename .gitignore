@@ -4,8 +4,6 @@
 !/.gitignore
 !/AGENTS.md
 !/SUBAGENT-SPEC.md
-!/SUBAGENT-SPEC.legacy.md
-!/web-search.json
 !/update-skills
 !/skills
 !/extensions
