@@ -1,5 +1,5 @@
 ---
 name: worker
-model: openai-codex/gpt-5.6-sol
+model: anthropic/claude-opus-5.5
 thinking: high
 ---

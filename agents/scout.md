@@ -1,6 +1,6 @@
 ---
 name: scout
-model: openai-codex/gpt-5.6-luna
-thinking: xhigh
+model: anthropic/claude-sonnet-5.5
+thinking: high
 tools: [read, grep, find, ls]
 ---
