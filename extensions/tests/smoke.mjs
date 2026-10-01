@@ -21,7 +21,7 @@ await loader.reload();
 const result = loader.getExtensions();
 assert.deepEqual(result.errors, []);
 assert.equal(result.extensions.length, paths.length);
-assert.ok(result.extensions.some(extension => extension.commands.has("delegate-auto")), "Local extensions must load");
+assert.ok(result.extensions.some(extension => extension.commands.has("quota")), "Local extensions must load");
 for (const extension of result.extensions) {
 	console.log(extension.path, [...extension.commands.keys()].map(name => "/" + name).join(" "));
 }

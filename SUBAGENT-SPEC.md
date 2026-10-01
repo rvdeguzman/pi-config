@@ -23,10 +23,6 @@ The responsibility split is:
 
 There is no workflow engine and no profile-level concurrency policy.
 
-### Opt-in Jev routing
-
-The direct tools below retain their existing behavior. `/delegate-auto on` additionally enables `herdr_delegate({ task, context?, agent?, delivery?, allowWrites?, cwd? })`: Jev gates dispatch, selects an eligible profile (unless pinned), then jointly selects a model and effort from the global routing-policy model allowlist intersected with available/scoped models and each model's supported thinking levels. Scoped effort pins are hard constraints; otherwise all supported levels are eligible, independent of profile/parent thinking defaults. Uncertain or failed routing returns the task to the parent without launching a child. Explicit `&name` requests bypass Jev through `herdr_async` as before. See [HERDR-ROUTING.md](extensions/HERDR-ROUTING.md) for setup, policy, privacy, and lifecycle details.
-
 ## Agent profiles
 
 Profiles live in Markdown files under:
@@ -101,7 +97,7 @@ Rules:
 - `tools` is the child's complete active-tool allowlist.
 - The reserved entry `extensions` expands to every extension-registered tool the caller has loaded with `direct` or `model-only` exposure (Pi built-in and SDK tools are excluded), e.g. `tools: [read, grep, find, ls, extensions]`. A real tool named `extensions` takes precedence over the token.
 - A missing `tools` value inherits the caller's active tools, excluding both `herdr_subagent` and `herdr_worker` to prevent recursive delegation.
-- All delegation tools (`herdr_subagent`, `herdr_async`, `herdr_worker`, `herdr_delegate`, `herdr_send`, `herdr_interrupt`) are removed from every child tool allowlist, even if a profile names them explicitly.
+- All delegation tools (`herdr_subagent`, `herdr_async`, `herdr_worker`, `herdr_send`, `herdr_interrupt`) are removed from every child tool allowlist, even if a profile names them explicitly.
 - Unknown tool names are configuration errors and must be reported before launching the child.
 - Tool restrictions are capability reduction inside Pi, not an operating-system sandbox.
 

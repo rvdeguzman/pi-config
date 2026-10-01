@@ -6,14 +6,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 
-// Keep run directories out of the real agent directory. Profiles still come
-// from the module-level registry, so tests that need specific profile settings
-// pass a routed profile explicitly.
+// Keep run directories and profiles out of the real agent directory. The
+// registry rereads agents/*.md on every call, so each profile variant a test
+// needs is a file here.
 const agentDir = await mkdtemp(join(tmpdir(), "herdr-subagent-agentdir-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
 await mkdir(join(agentDir, "agents"));
 await writeFile(join(agentDir, "agents", "scout.md"), "---\nname: scout\nthinking: low\ntools: [read, grep]\n---\n");
 await writeFile(join(agentDir, "agents", "worker.md"), "---\nname: worker\nthinking: high\n---\n");
+const testProfiles: Record<string, string> = {
+	fallback: "thinking: low\ntools: [read, grep]\nmodel: [openai-codex/first, openai-codex/second]",
+	nostart: "thinking: low\ntools: [read, grep]\nmodel: [nope/missing, openai-codex/second]",
+	"nostart-only": "thinking: low\ntools: [read, grep]\nmodel: nope/missing",
+	isolated: "thinking: high\nworktree: true",
+	"scout-worktree": "thinking: low\ntools: [read, grep]\nworktree: true",
+};
+for (const [name, body] of Object.entries(testProfiles)) {
+	await writeFile(join(agentDir, "agents", `${name}.md`), `---\nname: ${name}\n${body}\n---\n`);
+}
 delete process.env.HERDR_WORKSPACE_ID;
 after(async () => {
 	await rm(agentDir, { recursive: true, force: true });
@@ -65,7 +75,6 @@ function harness(herdr: FakeHerdr, options: { sessionId?: string; cwd?: string; 
 		"herdr_subagent",
 		"herdr_worker",
 		"herdr_async",
-		"herdr_delegate",
 		"herdr_send",
 		"herdr_interrupt",
 	];
@@ -91,8 +100,6 @@ function harness(herdr: FakeHerdr, options: { sessionId?: string; cwd?: string; 
 	return { pi, tools, handlers, messages, ctx, herdr };
 }
 
-const scout = { name: "scout", model: "openai-codex/gpt-test", thinking: "low", tools: ["read", "grep"] };
-const worker = { name: "worker", model: "openai-codex/gpt-test", thinking: "high" };
 
 test("herdrOk accepts exit 0 with empty stdout", async () => {
 	await herdrOk(execPi({ code: 0 }), ["tab", "close", "w1:t1"]);
@@ -272,7 +279,7 @@ test("herdr_async returns immediately and steers eventual completion or failure 
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr);
 	try {
-		const result = await tools.get("herdr_async").execute("async-1", { agent: "worker", task: "finish in the background" }, undefined, undefined, ctx, worker);
+		const result = await tools.get("herdr_async").execute("async-1", { agent: "worker", task: "finish in the background" }, undefined, undefined, ctx);
 		assert.match(result.content[0].text, /delivered automatically; do not poll/i);
 		assert.match(result.content[0].text, /run [0-9a-f]{8}/);
 		assert.equal(result.details.status, "running");
@@ -295,7 +302,7 @@ test("herdr_async returns immediately and steers eventual completion or failure 
 		assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
 
 		nextResult = { status: "failed", output: "partial async output", error: "child task failed", failureKind: "task" };
-		await tools.get("herdr_async").execute("async-2", { agent: "worker", task: "fail in the background" }, undefined, undefined, ctx, worker);
+		await tools.get("herdr_async").execute("async-2", { agent: "worker", task: "fail in the background" }, undefined, undefined, ctx);
 		await waitFor(() => messages.length === 2);
 		assert.match(messages[1]!.message.content, /Async Herdr subagent "worker" failed/);
 		assert.match(messages[1]!.message.content, /child task failed/);
@@ -318,8 +325,7 @@ test("async runs fall back to the next model only on retryable provider failures
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr);
 	try {
-		const profile = { ...scout, model: ["openai-codex/first", "openai-codex/second"] };
-		await tools.get("herdr_async").execute("fallback", { agent: "scout", task: "look" }, undefined, undefined, ctx, profile);
+		await tools.get("herdr_async").execute("fallback", { agent: "fallback", task: "look" }, undefined, undefined, ctx);
 		await waitFor(() => messages.length === 1);
 		assert.equal(herdr.launches.length, 2);
 		assert.match(messages[0]!.message.content, /completed/);
@@ -334,15 +340,13 @@ test("a child that fails to start falls back to the next model", async () => {
 		startError: (launch) => (launch.argv!.includes("nope") ? 'Unknown provider "nope"' : undefined),
 	});
 	const { tools, ctx } = harness(herdr);
-	const profile = { ...scout, model: ["nope/missing", "openai-codex/second"] };
-	const result = await tools.get("herdr_subagent").execute("start", { agent: "scout", task: "look" }, undefined, undefined, ctx, profile);
+	const result = await tools.get("herdr_subagent").execute("start", { agent: "nostart", task: "look" }, undefined, undefined, ctx);
 	assert.match(result.content[0].text, /openai-codex\/second/);
 	assert.equal(herdr.launches.length, 2);
 	assert.ok(herdr.closedTabs.includes(herdr.launches[0]!.tabId));
 
-	const only = { ...scout, model: "nope/missing" };
 	await assert.rejects(
-		tools.get("herdr_subagent").execute("start2", { agent: "scout", task: "look" }, undefined, undefined, ctx, only),
+		tools.get("herdr_subagent").execute("start2", { agent: "nostart-only", task: "look" }, undefined, undefined, ctx),
 		/Child Pi did not start/,
 	);
 });
@@ -355,7 +359,7 @@ test("a result arriving during exit grace wins over a vanished agent and auto-cl
 		},
 	});
 	const { tools, ctx } = harness(herdr);
-	const result = await tools.get("herdr_subagent").execute("call-1", { agent: "scout", task: "wait for a late result" }, undefined, undefined, ctx, scout);
+	const result = await tools.get("herdr_subagent").execute("call-1", { agent: "scout", task: "wait for a late result" }, undefined, undefined, ctx);
 	assert.match(result.content[0].text, /late but valid/);
 	assert.match(result.content[0].text, /auto-closed/);
 	assert.equal(result.details.autoClosed, true);
@@ -370,7 +374,7 @@ test("a child that exits without a result fails the blocking call with pane cont
 	});
 	const { tools, ctx } = harness(herdr);
 	await assert.rejects(
-		tools.get("herdr_subagent").execute("dead", { agent: "scout", task: "die" }, undefined, undefined, ctx, scout),
+		tools.get("herdr_subagent").execute("dead", { agent: "scout", task: "die" }, undefined, undefined, ctx),
 		/exited before reporting a result/,
 	);
 });
@@ -390,8 +394,8 @@ test("sibling subagent calls run concurrently and auto-close independently", asy
 	});
 	const { tools, ctx } = harness(herdr);
 	await Promise.all([
-		tools.get("herdr_subagent").execute("one", { agent: "scout", task: "first" }, undefined, undefined, ctx, scout),
-		tools.get("herdr_subagent").execute("two", { agent: "scout", task: "second" }, undefined, undefined, ctx, scout),
+		tools.get("herdr_subagent").execute("one", { agent: "scout", task: "first" }, undefined, undefined, ctx),
+		tools.get("herdr_subagent").execute("two", { agent: "scout", task: "second" }, undefined, undefined, ctx),
 	]);
 	assert.equal(maximum, 2);
 	assert.deepEqual(herdr.closedTabs.sort(), ["w1:t1", "w2:t1"]);
@@ -408,7 +412,7 @@ test("herdr_interrupt sends Escape to a live run and its partial result is deliv
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr);
 	try {
-		const dispatched = await tools.get("herdr_async").execute("long", { agent: "scout", task: "long job" }, undefined, undefined, ctx, scout);
+		const dispatched = await tools.get("herdr_async").execute("long", { agent: "scout", task: "long job" }, undefined, undefined, ctx);
 		const runId = dispatched.details.runId as string;
 		const interrupted = await tools.get("herdr_interrupt").execute("stop", { run: runId.slice(0, 8) }, undefined, undefined, ctx);
 		assert.match(interrupted.content[0].text, /Interrupt sent/);
@@ -435,7 +439,7 @@ test("herdr_send resumes a finished run's session with the follow-up message", a
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr);
 	try {
-		const first = await tools.get("herdr_subagent").execute("first", { agent: "scout", task: "initial" }, undefined, undefined, ctx, scout);
+		const first = await tools.get("herdr_subagent").execute("first", { agent: "scout", task: "initial" }, undefined, undefined, ctx);
 		const runId = first.details.runId as string;
 		assert.match(first.content[0].text, new RegExp(`Run: ${runId.slice(0, 8)}`));
 
@@ -467,7 +471,7 @@ test("async runs survive /reload: the next extension instance re-attaches and de
 	});
 	const sessionId = `reload-${Date.now()}`;
 	const first = harness(herdr, { sessionId });
-	await first.tools.get("herdr_async").execute("reload", { agent: "scout", task: "keep going" }, undefined, undefined, first.ctx, scout);
+	await first.tools.get("herdr_async").execute("reload", { agent: "scout", task: "keep going" }, undefined, undefined, first.ctx);
 	await first.handlers.get("session_shutdown")?.({ reason: "reload" }, first.ctx);
 	assert.deepEqual(herdr.closedTabs, [], "reload must not close async children");
 
@@ -484,7 +488,7 @@ test("async runs survive /reload: the next extension instance re-attaches and de
 test("quitting cancels async children and closes their tabs", async () => {
 	const herdr = createFakeHerdr({ onPrompt: () => undefined });
 	const { tools, messages, ctx, handlers } = harness(herdr);
-	await tools.get("herdr_async").execute("quit", { agent: "scout", task: "never finishes" }, undefined, undefined, ctx, scout);
+	await tools.get("herdr_async").execute("quit", { agent: "scout", task: "never finishes" }, undefined, undefined, ctx);
 	await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
 	assert.deepEqual(herdr.closedTabs, ["w1:t1"]);
 	await new Promise((resolve) => setTimeout(resolve, 100));
@@ -517,10 +521,9 @@ test("worktree profiles run on their own branch; clean checkouts are removed and
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr, { cwd: repo });
 	try {
-		const isolated = { ...worker, worktree: true };
-		const dispatched = await tools.get("herdr_async").execute("wt", { agent: "worker", task: "add a feature" }, undefined, undefined, ctx, isolated);
+		const dispatched = await tools.get("herdr_async").execute("wt", { agent: "isolated", task: "add a feature" }, undefined, undefined, ctx);
 		const created = herdr.worktrees[0]!;
-		assert.match(created.branch, /^pi\/worker-[0-9a-f]{8}$/);
+		assert.match(created.branch, /^pi\/isolated-[0-9a-f]{8}$/);
 		assert.match(dispatched.content[0].text, new RegExp(created.branch));
 		const launch = herdr.launches.find((candidate) => candidate.env.PI_HERDR_SUBAGENT_CHILD === "1")!;
 		assert.equal(launch.workspaceId, created.workspaceId, "child runs inside the worktree workspace");
@@ -556,8 +559,7 @@ test("dirty worktrees are retained with their tab; no-commit clean worktrees dro
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr, { cwd: repo });
 	try {
-		const isolated = { ...worker, worktree: true };
-		await tools.get("herdr_async").execute("dirty", { agent: "worker", task: "leave mess" }, undefined, undefined, ctx, isolated);
+		await tools.get("herdr_async").execute("dirty", { agent: "isolated", task: "leave mess" }, undefined, undefined, ctx);
 		await waitFor(() => messages.length === 1);
 		const dirty = herdr.worktrees[0]!;
 		assert.match(messages[0]!.message.content, /Uncommitted changes; checkout and tab retained/);
@@ -566,7 +568,7 @@ test("dirty worktrees are retained with their tab; no-commit clean worktrees dro
 		assert.equal(herdr.closedTabs.includes(`${dirty.workspaceId}:t2`), false);
 
 		mode = "noop";
-		await tools.get("herdr_async").execute("noop", { agent: "worker", task: "do nothing" }, undefined, undefined, ctx, isolated);
+		await tools.get("herdr_async").execute("noop", { agent: "isolated", task: "do nothing" }, undefined, undefined, ctx);
 		await waitFor(() => messages.length === 2);
 		const noop = herdr.worktrees[1]!;
 		assert.match(messages[1]!.message.content, /No commits; checkout and branch removed/);
@@ -584,7 +586,7 @@ test("worktree requests outside a Git repository run in place with a note", asyn
 	const herdr = createFakeHerdr();
 	const { tools, ctx } = harness(herdr, { cwd: plain });
 	try {
-		const result = await tools.get("herdr_subagent").execute("plain", { agent: "scout", task: "look" }, undefined, undefined, ctx, { ...scout, worktree: true });
+		const result = await tools.get("herdr_subagent").execute("plain", { agent: "scout-worktree", task: "look" }, undefined, undefined, ctx);
 		assert.equal(herdr.worktrees.length, 0);
 		assert.match(result.content[0].text, /not a Git repository; ran in place/);
 	} finally {

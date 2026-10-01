@@ -3,13 +3,9 @@ NODE ?= $(dir $(PI_TEST_ENTRY))node
 NODE_TYPE_FLAGS ?= --experimental-transform-types
 export PI_TEST_ENTRY
 
-NPM := $(dir $(NODE))npm
 .DEFAULT_GOAL := test
 
-.PHONY: install-deps test test-extensions smoke
-
-install-deps:
-	cd .. && PATH="$(dir $(NODE)):$$PATH" $(NPM) ci --ignore-scripts
+.PHONY: test test-extensions smoke
 
 test: test-extensions
 

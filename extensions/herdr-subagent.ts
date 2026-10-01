@@ -48,7 +48,6 @@ import { Type } from "typebox";
 
 import { createAgentRefAutocomplete } from "./lib/agent-ref-autocomplete.ts";
 import { subagentProfiles, type AgentProfile } from "./lib/subagent-profiles.ts";
-import { registerAutoDelegation } from "./lib/auto-delegation.ts";
 
 const CHILD_ENV = "PI_HERDR_SUBAGENT_CHILD";
 const WORKER_CHILD_ENV = "PI_HERDR_WORKER_CHILD";
@@ -72,7 +71,6 @@ const DELEGATION_TOOL_NAMES = new Set([
 	"herdr_subagent",
 	"herdr_worker",
 	"herdr_async",
-	"herdr_delegate",
 	"herdr_send",
 	"herdr_interrupt",
 ]);
@@ -1183,14 +1181,6 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	let shuttingDown = false;
 	let currentCtx: ExtensionContext | undefined;
 
-	registerAutoDelegation(pi, {
-		resolveTools: (tools, profile) => resolveChildTools(pi, tools, profile),
-		dispatch: (delivery, profile, id, params, signal, onUpdate, ctx) =>
-			delivery === "async"
-				? asyncTool.execute(id, params, signal, onUpdate, ctx, profile)
-				: blockingTool.execute(id, params, signal, onUpdate, ctx, profile),
-	});
-
 	const asyncRuns = () => [...liveRuns.values()].filter((run) => run.record.kind === "async");
 
 	const updateAsyncWidget = (ctx: ExtensionContext | undefined): void => {
@@ -1854,11 +1844,10 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			signal: AbortSignal | undefined,
 			_onUpdate: AgentToolUpdateCallback<unknown> | undefined,
 			ctx: ExtensionContext,
-			routedProfile?: AgentProfile,
 		) {
 			if (!params.task.trim()) throw new Error("Async subagent task must not be empty.");
 			if (signal?.aborted) throw new Error("Async subagent dispatch aborted.");
-			const profile = routedProfile ?? (await subagentProfiles.get(params.agent));
+			const profile = await subagentProfiles.get(params.agent);
 			const sourceCwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
 			await validateCwd(sourceCwd);
 			currentCtx ??= ctx;
@@ -1985,7 +1974,6 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			signal: AbortSignal | undefined,
 			onUpdate: AgentToolUpdateCallback<unknown> | undefined,
 			ctx: ExtensionContext,
-			routedProfile?: AgentProfile,
 		) {
 			if (!params.task.trim()) throw new Error("Subagent task must not be empty.");
 			if (params.agent.trim().toLowerCase() === WORKER_PROFILE) {
@@ -1993,7 +1981,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 					"The worker profile is not available to blocking herdr_subagent. Use herdr_async with agent worker for an automatic result, or herdr_worker for no-result dispatch.",
 				);
 			}
-			const profile = routedProfile ?? (await subagentProfiles.get(params.agent));
+			const profile = await subagentProfiles.get(params.agent);
 			const sourceCwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
 			await validateCwd(sourceCwd);
 			currentCtx ??= ctx;
