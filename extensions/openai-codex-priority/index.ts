@@ -16,11 +16,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", publish);
 
 	pi.registerCommand("fast", {
-		description: "Toggle OpenAI Codex fast mode (on|off|status)",
+		description: "Toggle OpenAI fast mode (on|off|status)",
 		handler: (args, ctx) => {
 			const action = args.trim().toLowerCase() || "toggle";
 			if (action === "status") {
-				ctx.ui.notify(`OpenAI Codex fast mode: ${getPriorityEnabled() ? "ON" : "OFF"}`, "info");
+				ctx.ui.notify(`OpenAI fast mode: ${getPriorityEnabled() ? "ON" : "OFF"}`, "info");
 				return;
 			}
 			if (!["on", "off", "toggle"].includes(action)) {
@@ -33,7 +33,7 @@ export default function (pi: ExtensionAPI) {
 				writeFileSync(stateFile, `${JSON.stringify({ enabled: next })}\n`, "utf8");
 				setPriorityEnabled(next);
 				publish();
-				ctx.ui.notify(`OpenAI Codex fast mode: ${next ? "ON" : "OFF"}`, "info");
+				ctx.ui.notify(`OpenAI fast mode: ${next ? "ON" : "OFF"}`, "info");
 			} catch (error) {
 				ctx.ui.notify(`Could not save fast mode: ${String(error)}`, "error");
 			}
@@ -41,6 +41,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		if (ctx.model?.provider === "openai-codex") return applyPriority(event.payload, getPriorityEnabled());
+		const provider = ctx.model?.provider;
+		if (provider === "openai" || provider === "openai-codex") {
+			return applyPriority(event.payload, getPriorityEnabled());
+		}
 	});
 }

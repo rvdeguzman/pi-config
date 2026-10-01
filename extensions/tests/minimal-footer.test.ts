@@ -109,21 +109,23 @@ test("redraws when fast mode changes", () => {
 	footer?.dispose();
 });
 
-test("shows fast only when OpenAI Codex fast mode is on", () => {
-	const ctx = {
-		cwd: homedir(),
-		model: { id: "gpt-5.6-sol", provider: "openai-codex", reasoning: false, contextWindow: 272_000 },
-		modelRegistry: { isUsingOAuth: () => true },
-		sessionManager: { getEntries: () => [] },
-		getContextUsage: () => undefined,
-	};
+for (const provider of ["openai", "openai-codex"]) {
+	test(`shows fast only when ${provider} fast mode is on`, () => {
+		const ctx = {
+			cwd: homedir(),
+			model: { id: "gpt-5.6-sol", provider, reasoning: false, contextWindow: 272_000 },
+			modelRegistry: { isUsingOAuth: () => true },
+			sessionManager: { getEntries: () => [] },
+			getContextUsage: () => undefined,
+		};
 
-	const fastFooter = formatFooter(ctx as never, 106, true);
-	assert.match(fastFooter[0], /gpt-5\.6-sol fast$/);
-	assert.ok(fastFooter.every((line) => visibleWidth(line) <= 106));
-	assert.match(formatFooter(ctx as never, 100, false)[0], /gpt-5\.6-sol$/);
-	assert.doesNotMatch(
-		formatFooter({ ...ctx, model: { ...ctx.model, provider: "kimi-coding" } } as never, 100, true)[0],
-		/fast /,
-	);
-});
+		const fastFooter = formatFooter(ctx as never, 106, true);
+		assert.match(fastFooter[0], /gpt-5\.6-sol fast$/);
+		assert.ok(fastFooter.every((line) => visibleWidth(line) <= 106));
+		assert.match(formatFooter(ctx as never, 100, false)[0], /gpt-5\.6-sol$/);
+		assert.doesNotMatch(
+			formatFooter({ ...ctx, model: { ...ctx.model, provider: "kimi-coding" } } as never, 100, true)[0],
+			/\bfast\b/,
+		);
+	});
+}
