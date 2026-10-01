@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved design specification. This replaces the previous asynchronous RPC/fleet design.
+Approved design specification, revision 2: Herdr-native launch, worktree isolation, run follow-ups and interrupts, reload survival, and run-directory retention. This replaces the previous asynchronous RPC/fleet design.
 
 ## Goal
 
@@ -18,6 +18,8 @@ The responsibility split is:
 - `herdr_subagent` waits for a result.
 - `herdr_async` returns launch coordinates immediately, monitors in the background, and steers the final result back automatically.
 - `herdr_worker` returns launch coordinates immediately and never polls for completion.
+- `herdr_send` continues a finished run by resuming its child session; `herdr_interrupt` stops a live run's current turn.
+- Profiles marked `worktree: true` run each child on its own Git branch in a Herdr-managed worktree.
 
 There is no workflow engine and no profile-level concurrency policy.
 
@@ -46,6 +48,15 @@ tools: [read, grep, find, ls]
 ---
 ```
 
+```yaml
+---
+name: worker
+model: anthropic/claude-opus-5.5
+thinking: high
+worktree: true
+---
+```
+
 ### Frontmatter schema
 
 ```ts
@@ -54,10 +65,11 @@ type AgentProfile = {
   model?: string | string[];
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   tools?: string[];
+  worktree?: boolean;
 };
 ```
 
-No other profile fields are supported. In particular, profiles do not define prompts, descriptions, extensions, durations, background behavior, workflows, or concurrency.
+No other profile fields are supported. In particular, profiles do not define prompts, descriptions, extensions, durations, background behavior, workflows, or concurrency. `worktree` selects checkout isolation only; it grants or removes no capabilities.
 
 ### Model resolution
 
@@ -78,7 +90,8 @@ Rules:
 - A string selects that model.
 - An array tries candidates in order.
 - A missing model inherits the caller's active model.
-- Fallback occurs only for retryable provider failures such as rate limiting, temporary unavailability, authentication/provider startup failure, or a model being unavailable.
+- Fallback occurs only for retryable provider failures such as rate limiting, temporary unavailability, authentication/provider startup failure, or a model being unavailable. A child Pi that exits before Herdr sees it ready counts as a startup failure.
+- Fallback applies to blocking and async runs. Fire-and-forget workers use the first candidate only.
 - Task errors, tool failures, invalid configuration, explicit aborts, and user cancellation do not advance to another model.
 - `thinking` applies to every candidate and is clamped by the selected model's capabilities.
 - A missing `thinking` value inherits the caller's current thinking level.
@@ -87,7 +100,7 @@ Rules:
 
 - `tools` is the child's complete active-tool allowlist.
 - A missing `tools` value inherits the caller's active tools, excluding both `herdr_subagent` and `herdr_worker` to prevent recursive delegation.
-- Both delegation tools are removed from every child tool allowlist, even if a profile names them explicitly.
+- All delegation tools (`herdr_subagent`, `herdr_async`, `herdr_worker`, `herdr_delegate`, `herdr_send`, `herdr_interrupt`) are removed from every child tool allowlist, even if a profile names them explicitly.
 - Unknown tool names are configuration errors and must be reported before launching the child.
 - Tool restrictions are capability reduction inside Pi, not an operating-system sandbox.
 
@@ -115,7 +128,17 @@ herdr_async({
 })
 ```
 
-Async runs are session-scoped: parent session shutdown aborts their monitors and closes their tabs. They currently use the first configured model candidate rather than ordered fallback.
+Async runs are session-scoped: quitting or switching sessions cancels them and closes their tabs. A `/reload` does not: children keep running, run records stay on disk, and the reloaded extension re-attaches and delivers each pending result exactly once. Async runs use ordered model fallback like blocking runs.
+
+Every async and blocking result reports a run id. Two tools act on runs from the current session:
+
+```ts
+herdr_send({ run: string; task: string })   // run id or unique prefix
+herdr_interrupt({ run: string })
+```
+
+- `herdr_send` requires a finished run. It resumes the child's Pi session (`pi --session <file>`) with the same profile tools, model, and thinking in a fresh pane (and the run's worktree branch, recreating the checkout if it was removed), submits the follow-up, and delivers the result asynchronously as a new run linked to the previous one.
+- `herdr_interrupt` requires a live run. It sends Escape to the child Pi; the child settles and its partial result is delivered as an interrupted failure. It does not retry.
 
 The fire-and-forget worker tool is also one-child-per-call, but fixes profile selection to `worker`:
 
@@ -204,34 +227,41 @@ When profiles are available, add concise guidance to the parent system prompt:
 
 ## Herdr execution
 
-The existing Herdr transport remains the execution backend.
+Requires Herdr 0.9+ (`agent start`, `agent prompt --wait --until`, `pane process-info`, `worktree create`).
 
-For `herdr_subagent`:
+### Launch protocol
 
-1. Resolve and validate the selected profile.
-2. Resolve the ordered model candidates, thinking level, and tool allowlist.
-3. Write the caller-authored task to the run directory.
-4. Create a background Herdr tab in the caller's workspace.
-5. Launch a separate Pi process with the resolved configuration and isolated session directory.
-6. Poll the atomic `result.json` as the authoritative completion result.
-7. Use Herdr pane and agent state for progress, blocked state, attachment, and inspection.
-8. Return the bounded result and child-session information, then auto-close the completed Herdr tab. While the child is running, progress updates include attach and capture commands.
+1. `herdr tab create --no-focus --env …` creates a background tab whose shell carries the child-mode environment (result path, exit-on-finish, or the worker marker). Outside Herdr, `workspace create` is used instead.
+2. `herdr agent start <name> --kind pi --pane <pane> -- <pi args>` launches Pi. Herdr returns only once it recognizes a ready Pi agent, so there is no type-into-shell race. While it waits, the parent polls `pane process-info`; if the shell regains the foreground, Pi exited during startup and the attempt fails within seconds instead of at Herdr's 45 s timeout.
+3. `herdr agent prompt <pane> <task> --wait --until working --until blocked` submits the task and confirms the turn started.
 
-For `herdr_async`:
+### Completion
 
-1. Resolve the named profile and its first model candidate, thinking level, and tool allowlist.
-2. Launch a reported child in a background Herdr tab and return its coordinates immediately.
-3. Track active runs in a parent widget while a detached session-scoped monitor polls `result.json` and Herdr state.
-4. Auto-close the tab after completion or failure.
-5. Inject a visible `herdr-async-result` custom message with `deliverAs: "steer"` and `triggerTurn: true`.
+The child writes an atomic result file on `agent_settled`; that file is the only completion truth. The parent watches the run directory with `fs.watch` (plus a 1 s fallback stat) and probes Herdr (`agent get`) every 2 s for blocked state and liveness. An agent that disappears without a result fails after a short grace period, with the pane tail as context. Blocking calls also read the pane every 2 s for their live preview; async monitors do not.
 
-For `herdr_worker`:
+### Worktree isolation
 
-1. Resolve the fixed `worker` profile and its first model candidate, thinking level, and tool allowlist.
-2. Write the caller-authored task to a private worker run directory.
-3. Create a background Herdr tab and launch the child Pi process with a worker-child environment marker.
-4. Return the workspace/tab/pane IDs and attach, capture, and cleanup commands immediately after successful dispatch.
-5. Perform no completion, pane-output, agent-state, sentinel, or result-file polling.
+When the profile sets `worktree: true` and the working directory is inside a Git repository with at least one commit:
+
+1. `herdr worktree create` creates branch `pi/<profile>-<run8>` from the source repository's committed `HEAD` and opens it as a workspace. The child tab is created there and the workspace's root tab is closed. The child's cwd keeps the caller's relative subdirectory.
+2. A short note is appended to the task: the checkout path, branch, and base commit; that uncommitted parent changes are absent; and that the child must commit on the branch and must not merge, rebase, push, or switch branches.
+3. After the run, the parent inspects the checkout (commits since base, diffstat, uncommitted changes):
+   - Uncommitted changes: the checkout and its tab are retained and reported.
+   - Clean with commits: the tab closes, the checkout is removed with `git worktree remove` (never forced), and the branch is kept and reported with an integration hint.
+   - Clean without commits: the checkout and branch are removed.
+4. A launch failure or abort applies the same release rules. The extension never commits, merges, or deletes a branch that has commits. Integration is the parent's job.
+
+Outside a Git repository, the run proceeds in place and the result says so. Parallel isolated runs are allowed because each one gets a unique branch.
+
+### Per tool
+
+- `herdr_subagent`: launch, monitor, settle, and return the bounded result. Progress updates include the attach and capture commands. Retryable failures move to the next model candidate in a fresh tab.
+- `herdr_async`: return the run id and Herdr coordinates once the first child is running. A session-scoped monitor tracks it in the parent widget, auto-closes the tab, and injects a visible `herdr-async-result` custom message with `deliverAs: "steer"` and `triggerTurn: true`.
+- `herdr_worker`: launch with the worker marker (and worktree, if the profile asks for one), then return the tab/pane IDs plus attach, capture, and cleanup commands. It does no result polling. Its tab and worktree are left for the user.
+
+### Run records and retention
+
+Each run writes `run.json` next to its `task.md`, session directory, and result file under `~/.pi/agent/herdr-subagents/<parent session>/<run>/` (workers use `herdr-workers/`). Records drive `herdr_send`, `herdr_interrupt`, and re-attachment after `/reload` or a crash. On startup, run directories older than `PI_HERDR_SUBAGENT_RETENTION_DAYS` (default 14; `0` disables) are pruned in the background, except the current session's. `/herdr-prune [days]` prunes on demand.
 
 Blocking children remain visible and attachable while running, then shut down and auto-close after the parent collects their result. Set `PI_HERDR_SUBAGENT_EXIT_ON_FINISH=0` on the parent to retain completed blocking tabs for inspection. Fire-and-forget workers remain alive until explicitly closed. A blocking subagent fallback attempt belongs to the same logical tool call and must not produce multiple successful results. Fire-and-forget workers do not attempt model fallback because the parent does not observe completion.
 
@@ -239,9 +269,10 @@ Blocking children remain visible and attachable while running, then shut down an
 
 - A child working inside the trusted caller project may inherit project approval.
 - A child outside that tree starts without project approval.
-- Blocking child mode registers only its result reporter and does not register delegation tools.
-- Worker child mode registers neither `herdr_subagent` nor `herdr_worker` and performs no result reporting.
-- All four delegation tool names (`herdr_subagent`, `herdr_async`, `herdr_worker`, and `herdr_delegate`) are excluded from all child `--tools` allowlists.
+- Trust follows the caller's source directory, so a worktree of a trusted project is trusted.
+- Reported child mode registers only its result reporter and does not register delegation tools.
+- Worker child mode registers no tools and performs no result reporting.
+- All six delegation tool names are excluded from all child `--tools` allowlists.
 - Profile file contents are configuration; Markdown bodies are ignored.
 - Shell commands must continue to use argument-safe construction and private run files.
 - Returned output remains capped at Pi's standard 50 KB / 2,000-line tool limit; the complete child session stays on disk.
@@ -271,6 +302,11 @@ Add focused tests for:
 - Immediate `herdr_worker` dispatch with returned tab/pane/attach commands and no result polling.
 - Immediate `herdr_async` dispatch followed by one automatic steer delivery when its result appears.
 - Async failure delivery, tab cleanup, tool stripping, and parent-shutdown cancellation.
+- Async model fallback, and fast startup-failure fallback.
+- Interrupt delivery and follow-up resume through `herdr_send`.
+- `/reload` detaching and re-attaching async runs with exactly-once delivery.
+- Worktree creation and branch reporting; retention of dirty checkouts; removal of no-commit branches; in-place fallback outside Git.
+- Age-based pruning of run directories.
 - Unknown and malformed profiles.
 - Multiple sibling calls running concurrently.
 - Independent cancellation and shutdown cleanup for multiple children.
@@ -283,8 +319,10 @@ Add focused tests for:
 ## Acceptance criteria
 
 - The parent invokes a named blocking or asynchronous profile, or the fixed fire-and-forget worker, and supplies only the complete task and optional working directory.
-- Profiles contain only `name`, `model`, `thinking`, and `tools` frontmatter.
-- Ordered model fallback works only for retryable provider failures in blocking subagent calls.
+- Profiles contain only `name`, `model`, `thinking`, `tools`, and `worktree` frontmatter.
+- Ordered model fallback works only for retryable provider or startup failures, in blocking and async calls.
+- Isolated profiles never write to the parent checkout, and their commits are reported as a branch for the parent to integrate.
+- Finished runs can be continued with `herdr_send`, live runs can be interrupted, and async runs survive `/reload`.
 - `herdr_worker` returns Herdr launch coordinates immediately and never polls for completion.
 - The parent can launch as many sibling calls as it chooses without an extension-wide serial queue.
 - Each child remains visible and inspectable in Herdr while running; completed blocking and async tabs auto-close, while worker tabs remain open.

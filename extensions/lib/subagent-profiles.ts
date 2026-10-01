@@ -12,6 +12,8 @@ export interface AgentProfile {
 	model?: string | string[];
 	thinking?: ThinkingLevel;
 	tools?: string[];
+	/** Run each child in a dedicated Git worktree on its own branch. */
+	worktree?: boolean;
 }
 
 export interface ProfileRegistry {
@@ -19,7 +21,7 @@ export interface ProfileRegistry {
 	get(name: string): Promise<AgentProfile>;
 }
 
-const PROFILE_KEYS = new Set(["name", "model", "thinking", "tools"]);
+const PROFILE_KEYS = new Set(["name", "model", "thinking", "tools", "worktree"]);
 const NAME_PATTERN = /^[a-z][a-z0-9_-]*$/i;
 
 function stringList(value: unknown, field: string, file: string): string[] {
@@ -66,11 +68,22 @@ export function parseAgentProfile(source: string, file = "<profile>"): AgentProf
 		}
 		profile.tools = [...new Set(frontmatter.tools.map((item) => (item as string).trim()))];
 	}
+	if (frontmatter.worktree !== undefined) {
+		if (typeof frontmatter.worktree !== "boolean") {
+			throw new Error(`Malformed agent profile ${file}: worktree must be true or false.`);
+		}
+		profile.worktree = frontmatter.worktree;
+	}
 	return profile;
 }
 
 export class FileProfileRegistry implements ProfileRegistry {
-	constructor(readonly directory = path.join(getAgentDir(), "agents")) {}
+	/** Without an explicit directory, follow the current agent dir (PI_CODING_AGENT_DIR) at each read. */
+	constructor(private readonly explicitDirectory?: string) {}
+
+	get directory(): string {
+		return this.explicitDirectory ?? path.join(getAgentDir(), "agents");
+	}
 
 	private validateProfiles(files: Array<{ name: string; source: string }>): AgentProfile[] {
 		const profiles: AgentProfile[] = [];

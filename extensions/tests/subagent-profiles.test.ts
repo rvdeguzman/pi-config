@@ -23,6 +23,11 @@ test("profile parser accepts string and ordered array models", () => {
 	});
 });
 
+test("profile parser accepts a boolean worktree flag", () => {
+	assert.deepEqual(parseAgentProfile("---\nname: worker\nworktree: true\n---"), { name: "worker", worktree: true });
+	assert.throws(() => parseAgentProfile("---\nname: worker\nworktree: yes please\n---"), /worktree must be true or false/);
+});
+
 test("profile parser rejects unsupported and malformed configuration", () => {
 	assert.throws(() => parseAgentProfile("---\nname: bad\nprompt: nope\n---"), /unsupported field/);
 	assert.throws(() => parseAgentProfile("---\nname: bad\nmodel: []\n---"), /non-empty string array/);
