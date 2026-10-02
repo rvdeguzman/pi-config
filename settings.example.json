@@ -1,0 +1,44 @@
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-opus-5-5",
+  "defaultThinkingLevel": "high",
+  "packages": [
+    "npm:pi-exa",
+    "npm:pi-macos-cua",
+    "git:github.com/earendil-works/pi-review",
+    "git:github.com/earendil-works/pi-review-loop",
+    "npm:@earendil-works/pi-voice",
+    {
+      "source": "git:github.com/mitsuhiko/agent-stuff@122e2994adddb113c04764c5697217dae120fcc6",
+      "extensions": [
+        "extensions/btw.ts",
+        "extensions/files.ts"
+      ],
+      "skills": [],
+      "prompts": [],
+      "themes": []
+    },
+    "npm:pi-anthropic-oauth",
+    {
+      "source": "npm:@earendil-works/pi-radius-work",
+      "extensions": [
+        "extensions/radius-google-workspaces.ts"
+      ]
+    }
+  ],
+  "theme": "dark",
+  "enabledModels": [
+    "anthropic/claude-opus-5-5",
+    "anthropic/claude-sonnet-5-5",
+    "openai/gpt-6.1-sol"
+  ],
+  "steeringMode": "all",
+  "showCacheMissNotices": true,
+  "quietStartup": true,
+  "defaultProjectTrust": "always",
+  "treeFilterMode": "all",
+  "tuiMode": "regular",
+  "warnings": {
+    "anthropicExtraUsage": false
+  }
+}

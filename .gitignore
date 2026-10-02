@@ -2,6 +2,9 @@
 # config; everything else there is machine state (auth, sessions, caches).
 /*
 !/.gitignore
+!/Makefile
+!/README.md
+!/settings.example.json
 !/AGENTS.md
 !/SUBAGENT-SPEC.md
 !/update-skills
