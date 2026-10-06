@@ -1,669 +1,136 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-	Editor,
-	type EditorTheme,
-	Key,
-	Text,
-	matchesKey,
-	truncateToWidth,
-	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-
-interface AskOption {
-	label: string;
-	value: string;
-	description?: string;
-}
-
-interface DisplayOption extends AskOption {
-	id: string;
-	index?: number;
-	isOther?: boolean;
-	isSubmit?: boolean;
-}
-
-interface TextAnswer {
-	type: "text";
-	label: string;
-	value: string;
-}
-
-interface OptionAnswer {
-	type: "option";
-	label: string;
-	value: string;
-	index: number;
-}
-
-interface OtherAnswer {
-	type: "other";
-	label: string;
-	value: string;
-}
-
-type AskAnswer = TextAnswer | OptionAnswer | OtherAnswer;
-type AskUserQuestionStatus = "answered" | "cancelled" | "unavailable";
-type AskUserQuestionMode = "text" | "single-select" | "multi-select";
-
-interface AskUserQuestionResultDetails {
-	status: AskUserQuestionStatus;
-	question: string;
-	context?: string;
-	mode: AskUserQuestionMode;
-	answers: AskAnswer[];
-	message?: string;
-}
+import {
+	formatQuestionnaireResult,
+	Questionnaire,
+	type QuestionnaireResult,
+} from "./lib/ask-questionnaire-state.ts";
+import { QuestionnaireDialog, safeQuestionText } from "./lib/ask-questionnaire-ui.ts";
 
 const OptionSchema = Type.Object({
-	label: Type.String({
-		description:
-			'Display label for the option. If you recommend an option, place it first and append "(Recommended)" to the label.',
-	}),
-	value: Type.Optional(
-		Type.String({
-			description: "Optional machine-readable value returned for the option. Defaults to the label.",
-		}),
-	),
-	description: Type.Optional(Type.String({ description: "Optional extra detail shown below the option." })),
+	label: Type.String({ description: 'Display label. Put a recommendation first and append "(Recommended)".' }),
+	value: Type.Optional(Type.String({ description: "Machine-readable value; defaults to the label." })),
+	description: Type.Optional(Type.String({ description: "Extra detail shown below the option." })),
 });
+
+const QuestionFields = {
+	question: Type.String({ description: "Question to ask." }),
+	details: Type.Optional(Type.String({ description: "Context shown below the question." })),
+	options: Type.Optional(Type.Array(OptionSchema, { description: "Choices; Other is automatic. Omit for free-form text." })),
+	multiSelect: Type.Optional(Type.Boolean({ description: "Allow multiple selected answers." })),
+};
 
 const AskUserQuestionParams = Type.Object({
-	question: Type.String({
-		description: "The single question to ask the user. Ask exactly one question per tool call.",
-	}),
-	details: Type.Optional(
-		Type.String({
-			description: "Optional extra context or instructions shown under the question.",
-		}),
-	),
-	options: Type.Optional(
-		Type.Array(OptionSchema, {
-			description:
-				"Optional multiple-choice options. Omit or pass an empty array for free-form text input. Users will always be able to choose Other and type a custom answer when options are provided.",
-		}),
-	),
-	multiSelect: Type.Optional(
-		Type.Boolean({
-			description: "Set to true to allow multiple answers to be selected for a question.",
-		}),
-	),
+	question: Type.Optional(QuestionFields.question),
+	details: QuestionFields.details,
+	options: QuestionFields.options,
+	multiSelect: QuestionFields.multiSelect,
+	questions: Type.Optional(Type.Array(Type.Object({
+		id: Type.String({ description: "Unique question identifier for matching answers." }),
+		header: Type.Optional(Type.String({ description: "Short label shown in question navigation." })),
+		...QuestionFields,
+	}), { minItems: 1, description: "A related question chain, with navigation and final review. Do not combine with top-level question fields." })),
 });
 
-function normalizeOptions(options: Array<{ label: string; value?: string; description?: string }> | undefined): AskOption[] {
-	return (options || [])
-		.map((option) => ({
-			label: option.label.trim(),
-			value: option.value?.trim() || option.label.trim(),
-			description: option.description?.trim() || undefined,
-		}))
-		.filter((option) => option.label.length > 0);
+interface SharedUiLock {
+	withLock<T>(fn: () => T | Promise<T>): Promise<T>;
 }
 
-function getOtherLabel(options: AskOption[]): string {
-	return options.some((option) => option.label.toLowerCase() === "other") ? "Other (custom)" : "Other";
-}
-
-function createEditorTheme(theme: any): EditorTheme {
-	return {
-		borderColor: (s) => theme.fg("accent", s),
-		selectList: {
-			selectedPrefix: (t) => theme.fg("accent", t),
-			selectedText: (t) => theme.fg("accent", t),
-			description: (t) => theme.fg("muted", t),
-			scrollInfo: (t) => theme.fg("dim", t),
-			noMatch: (t) => theme.fg("warning", t),
+// Preserve the shared popup lock used by other local extensions.
+const uiGlobals = globalThis as typeof globalThis & { __piSharedUiLock?: SharedUiLock };
+if (!uiGlobals.__piSharedUiLock) {
+	let chain: Promise<void> = Promise.resolve();
+	uiGlobals.__piSharedUiLock = {
+		withLock<T>(fn: () => T | Promise<T>): Promise<T> {
+			const previous = chain;
+			const release = Promise.withResolvers<void>();
+			chain = release.promise;
+			return previous.then(fn).finally(() => release.resolve());
 		},
 	};
 }
+const sharedUiLock = uiGlobals.__piSharedUiLock;
 
-function addWrapped(lines: string[], text: string, width: number, indent = ""): void {
-	const contentWidth = Math.max(1, width - indent.length);
-	for (const line of wrapTextWithAnsi(text, contentWidth)) {
-		lines.push(truncateToWidth(`${indent}${line}`, width));
+/** Aborting a queued call returns immediately; its queued callback must still check the signal. */
+async function withUiLock(
+	model: Questionnaire,
+	signal: AbortSignal | undefined,
+	show: () => Promise<QuestionnaireResult>,
+): Promise<QuestionnaireResult> {
+	if (signal?.aborted) return model.result("cancelled");
+	const aborted = Promise.withResolvers<QuestionnaireResult>();
+	const onAbort = (): void => aborted.resolve(model.result("cancelled"));
+	signal?.addEventListener("abort", onAbort, { once: true });
+	const locked = sharedUiLock.withLock(() => signal?.aborted ? model.result("cancelled") : show());
+	try {
+		return await (signal ? Promise.race([locked, aborted.promise]) : locked);
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
 	}
 }
 
-function formatAnswerForModel(answer: AskAnswer): string {
-	switch (answer.type) {
-		case "text":
-			return answer.label;
-		case "other":
-			return `Other: ${answer.label}`;
-		case "option":
-			return `${answer.index}. ${answer.label}`;
-	}
-}
-
-function answerSortRank(answer: AskAnswer): number {
-	switch (answer.type) {
-		case "option":
-			return answer.index;
-		case "other":
-			return Number.MAX_SAFE_INTEGER - 1;
-		case "text":
-			return Number.MAX_SAFE_INTEGER;
-	}
-}
-
-function sortAnswers(answers: AskAnswer[]): AskAnswer[] {
-	return [...answers].sort((a, b) => answerSortRank(a) - answerSortRank(b));
-}
-
-function buildStructuredResult(
-	status: AskUserQuestionStatus,
-	question: string,
-	mode: AskUserQuestionMode,
-	answers: AskAnswer[],
-	context?: string,
-	message?: string,
-) {
-	return {
-		status,
-		question,
-		context,
-		mode,
-		answers,
-		message,
-	} as AskUserQuestionResultDetails;
-}
-
-function cancelledResult(question: string, mode: AskUserQuestionMode, context?: string) {
-	const message = "User cancelled the question";
-	return {
-		content: [{ type: "text" as const, text: message }],
-		details: buildStructuredResult("cancelled", question, mode, [], context, message),
-	};
-}
-
-function unavailableResult(question: string, mode: AskUserQuestionMode, message: string, context?: string) {
-	return {
-		content: [{ type: "text" as const, text: message }],
-		details: buildStructuredResult("unavailable", question, mode, [], context, message),
-	};
-}
-
-function buildResult(question: string, context: string | undefined, mode: AskUserQuestionMode, answers: AskAnswer[]) {
-	let text: string;
-	if (mode === "text") {
-		const answer = answers[0];
-		text = answer.label.trim().length > 0 ? `User answered: ${answer.label}` : "User submitted an empty response";
-	} else if (mode === "single-select") {
-		text = `User selected: ${formatAnswerForModel(answers[0])}`;
-	} else {
-		text = `User selected:\n${answers.map((answer) => `- ${formatAnswerForModel(answer)}`).join("\n")}`;
-	}
-
-	return {
-		content: [{ type: "text" as const, text }],
-		details: buildStructuredResult("answered", question, mode, answers, context),
-	};
-}
-
-async function askSingleChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: AskOption[],
-): Promise<AskAnswer | null> {
-	const otherLabel = getOtherLabel(options);
-	const allOptions: DisplayOption[] = [
-		...options.map((option, index) => ({ ...option, id: `option:${index}`, index: index + 1 })),
-		{ id: "other", label: otherLabel, value: "__other__", isOther: true },
-	];
-
-	return ctx.ui.custom<AskAnswer | null>((tui: any, theme: any, _kb: any, done: (result: AskAnswer | null) => void) => {
-		let optionIndex = 0;
-		let editMode = false;
-		let cachedLines: string[] | undefined;
-		let cachedWidth = -1;
-		const editor = new Editor(tui, createEditorTheme(theme));
-
-		editor.onSubmit = (value) => {
-			const trimmed = value.trim();
-			if (!trimmed) return;
-			done({ type: "other", label: trimmed, value: trimmed });
-		};
-
-		function refresh() {
-			cachedLines = undefined;
-			tui.requestRender();
-		}
-
-		function handleInput(data: string) {
-			if (editMode) {
-				if (matchesKey(data, Key.escape)) {
-					editMode = false;
-					editor.setText("");
-					refresh();
-					return;
-				}
-				editor.handleInput(data);
-				refresh();
-				return;
-			}
-
-			if (matchesKey(data, Key.up)) {
-				optionIndex = Math.max(0, optionIndex - 1);
-				refresh();
-				return;
-			}
-			if (matchesKey(data, Key.down)) {
-				optionIndex = Math.min(allOptions.length - 1, optionIndex + 1);
-				refresh();
-				return;
-			}
-			if (matchesKey(data, Key.enter)) {
-				const selected = allOptions[optionIndex];
-				if (selected.isOther) {
-					editMode = true;
-					editor.setText("");
-					refresh();
-					return;
-				}
-				done({
-					type: "option",
-					label: selected.label,
-					value: selected.value,
-					index: selected.index!,
-				});
-				return;
-			}
-			if (matchesKey(data, Key.escape)) {
-				done(null);
-			}
-		}
-
-		function render(width: number): string[] {
-			// The cache MUST be keyed on width: pi-tui calls requestRender() but NOT
-			// invalidate() on terminal resize, so render() can be re-entered with a
-			// new width. Returning stale wider lines trips the TUI width guard and
-			// crashes the process.
-			if (cachedLines && cachedWidth === width) return cachedLines;
-
-			const lines: string[] = [];
-			const add = (text: string) => lines.push(truncateToWidth(text, width));
-
-			add(theme.fg("accent", "─".repeat(width)));
-			addWrapped(lines, theme.fg("text", ` ${question}`), width);
-			if (context) {
-				lines.push("");
-				addWrapped(lines, theme.fg("muted", ` ${context}`), width);
-			}
-			lines.push("");
-
-			for (let i = 0; i < allOptions.length; i++) {
-				const option = allOptions[i];
-				const selected = i === optionIndex;
-				const prefix = selected ? theme.fg("accent", "> ") : "  ";
-				const label = option.isOther ? option.label : `${option.index}. ${option.label}`;
-				const styled = selected ? theme.fg("accent", label) : theme.fg("text", label);
-				add(`${prefix}${styled}`);
-				if (option.description) {
-					addWrapped(lines, theme.fg("muted", option.description), width, "     ");
-				}
-			}
-
-			if (editMode) {
-				lines.push("");
-				add(theme.fg("muted", " Write your custom answer:"));
-				for (const line of editor.render(Math.max(1, width - 2))) {
-					add(` ${line}`);
-				}
-				lines.push("");
-				add(theme.fg("dim", " Enter to submit • Esc to go back"));
-			} else {
-				lines.push("");
-				add(theme.fg("dim", " ↑↓ navigate • Enter select • Esc cancel"));
-			}
-
-			add(theme.fg("accent", "─".repeat(width)));
-			cachedLines = lines;
-			cachedWidth = width;
-			return lines;
-		}
-
-		return {
-			render,
-			invalidate: () => {
-				cachedLines = undefined;
-			},
-			handleInput,
-		};
-	});
-}
-
-async function askMultiChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: AskOption[],
-): Promise<AskAnswer[] | null> {
-	const otherLabel = getOtherLabel(options);
-	const choiceItems: DisplayOption[] = options.map((option, index) => ({
-		...option,
-		id: `option:${index}`,
-		index: index + 1,
-	}));
-	const submitItem: DisplayOption = { id: "submit", label: "Submit", value: "__submit__", isSubmit: true };
-	const allItems: DisplayOption[] = [
-		...choiceItems,
-		{ id: "other", label: otherLabel, value: "__other__", isOther: true },
-		submitItem,
-	];
-
-	return ctx.ui.custom<AskAnswer[] | null>((tui: any, theme: any, _kb: any, done: (result: AskAnswer[] | null) => void) => {
-		let optionIndex = 0;
-		let editMode = false;
-		let cachedLines: string[] | undefined;
-		let cachedWidth = -1;
-		const selected = new Map<string, AskAnswer>();
-		const editor = new Editor(tui, createEditorTheme(theme));
-
-		editor.onSubmit = (value) => {
-			const trimmed = value.trim();
-			if (!trimmed) return;
-			selected.set("other", { type: "other", label: trimmed, value: trimmed });
-			editMode = false;
-			refresh();
-		};
-
-		function refresh() {
-			cachedLines = undefined;
-			tui.requestRender();
-		}
-
-		function toggleOption(item: DisplayOption) {
-			if (selected.has(item.id)) {
-				selected.delete(item.id);
-			} else {
-				selected.set(item.id, {
-					type: "option",
-					label: item.label,
-					value: item.value,
-					index: item.index!,
-				});
-			}
-			refresh();
-		}
-
-		function handleInput(data: string) {
-			if (editMode) {
-				if (matchesKey(data, Key.escape)) {
-					editMode = false;
-					editor.setText(selected.get("other")?.label || "");
-					refresh();
-					return;
-				}
-				editor.handleInput(data);
-				refresh();
-				return;
-			}
-
-			if (matchesKey(data, Key.up)) {
-				optionIndex = Math.max(0, optionIndex - 1);
-				refresh();
-				return;
-			}
-			if (matchesKey(data, Key.down)) {
-				optionIndex = Math.min(allItems.length - 1, optionIndex + 1);
-				refresh();
-				return;
-			}
-
-			const current = allItems[optionIndex];
-			if (matchesKey(data, Key.space)) {
-				if (current.isSubmit) return;
-				if (current.isOther) {
-					if (selected.has("other")) {
-						selected.delete("other");
-						refresh();
-					} else {
-						editMode = true;
-						editor.setText("");
-						refresh();
-					}
-					return;
-				}
-				toggleOption(current);
-				return;
-			}
-
-			if (matchesKey(data, Key.enter)) {
-				if (current.isSubmit) {
-					if (selected.size > 0) {
-						done(sortAnswers(Array.from(selected.values())));
-					}
-					return;
-				}
-				if (current.isOther) {
-					editMode = true;
-					editor.setText(selected.get("other")?.label || "");
-					refresh();
-					return;
-				}
-				toggleOption(current);
-				return;
-			}
-
-			if (matchesKey(data, Key.escape)) {
-				done(null);
-			}
-		}
-
-		function render(width: number): string[] {
-			// The cache MUST be keyed on width: pi-tui calls requestRender() but NOT
-			// invalidate() on terminal resize, so render() can be re-entered with a
-			// new width. Returning stale wider lines trips the TUI width guard and
-			// crashes the process.
-			if (cachedLines && cachedWidth === width) return cachedLines;
-
-			const lines: string[] = [];
-			const add = (text: string) => lines.push(truncateToWidth(text, width));
-
-			add(theme.fg("accent", "─".repeat(width)));
-			addWrapped(lines, theme.fg("text", ` ${question}`), width);
-			if (context) {
-				lines.push("");
-				addWrapped(lines, theme.fg("muted", ` ${context}`), width);
-			}
-			lines.push("");
-
-			for (let i = 0; i < allItems.length; i++) {
-				const item = allItems[i];
-				const isFocused = i === optionIndex;
-				const prefix = isFocused ? theme.fg("accent", "> ") : "  ";
-
-				if (item.isSubmit) {
-					const label = selected.size > 0 ? `✓ ${item.label} (${selected.size} selected)` : `○ ${item.label}`;
-					const styled = isFocused
-						? theme.fg("accent", label)
-						: theme.fg(selected.size > 0 ? "success" : "dim", label);
-					add(`${prefix}${styled}`);
-					continue;
-				}
-
-				if (item.isOther) {
-					const other = selected.get("other");
-					const marker = other ? "[x]" : "[ ]";
-					const suffix = other ? ` — ${other.label}` : "";
-					const styled = isFocused
-						? theme.fg("accent", `${marker} ${item.label}${suffix}`)
-						: theme.fg(other ? "success" : "text", `${marker} ${item.label}${suffix}`);
-					add(`${prefix}${styled}`);
-					continue;
-				}
-
-				const checked = selected.has(item.id);
-				const marker = checked ? "[x]" : "[ ]";
-				const label = `${marker} ${item.index}. ${item.label}`;
-				const styled = isFocused
-					? theme.fg("accent", label)
-					: theme.fg(checked ? "success" : "text", label);
-				add(`${prefix}${styled}`);
-				if (item.description) {
-					addWrapped(lines, theme.fg("muted", item.description), width, "     ");
-				}
-			}
-
-			if (editMode) {
-				lines.push("");
-				add(theme.fg("muted", " Write your custom answer:"));
-				for (const line of editor.render(Math.max(1, width - 2))) {
-					add(` ${line}`);
-				}
-				lines.push("");
-				add(theme.fg("dim", " Enter to save • Esc to go back"));
-			} else {
-				lines.push("");
-				if (selected.size === 0) {
-					add(theme.fg("warning", " Select at least one answer before submitting."));
-				}
-				add(theme.fg("dim", " ↑↓ navigate • Space toggle • Enter edit/submit • Esc cancel"));
-			}
-
-			add(theme.fg("accent", "─".repeat(width)));
-			cachedLines = lines;
-			cachedWidth = width;
-			return lines;
-		}
-
-		return {
-			render,
-			invalidate: () => {
-				cachedLines = undefined;
-			},
-			handleInput,
-		};
-	});
-}
-
-// Shared UI mutex. ctx.ui.custom()/editor can only handle one active call at
-// a time, so ALL pop-up-style tools (ask_user_question, quiz, ...) must
-// serialize against each other, not just against themselves. We stash one
-// mutex on globalThis so separate extension files can share it without
-// importing each other.
-const SHARED_UI_LOCK_KEY = "__piSharedUiLock";
-function getSharedUiLock() {
-	const g = globalThis as any;
-	if (!g[SHARED_UI_LOCK_KEY]) {
-		let chain: Promise<void> = Promise.resolve();
-		g[SHARED_UI_LOCK_KEY] = {
-			withLock<T>(fn: () => T | Promise<T>): Promise<T> {
-				const prev = chain;
-				let release: () => void;
-				chain = new Promise<void>((r) => { release = r; });
-				return prev.then(fn).finally(() => release!());
-			},
-		};
-	}
-	return g[SHARED_UI_LOCK_KEY] as { withLock<T>(fn: () => T | Promise<T>): Promise<T> };
-}
-const sharedUiLock = getSharedUiLock();
-
-function withUILock<T>(fn: () => Promise<T>): Promise<T> {
-	return sharedUiLock.withLock(fn);
-}
-
-export default function askUserQuestion(pi: ExtensionAPI) {
-	pi.registerTool({
+export default function askUserQuestion(pi: ExtensionAPI): void {
+	const tool: ToolDefinition<typeof AskUserQuestionParams, QuestionnaireResult> = {
 		name: "ask_user_question",
 		label: "ask_user_question",
-		description:
-			"Ask the user a single question and pause execution until they answer. Use this when requirements are ambiguous, user preferences are needed, a decision would materially affect implementation, or you need confirmation before proceeding. Ask exactly one question per tool call, and prefer multiple separate tool calls over bundling unrelated questions together.",
-		promptSnippet:
-			"Use this tool to ask exactly one clarifying question, missing-requirement question, preference question, or decision question before continuing.",
+		description: "Ask the user for preferences, clarification or a decision. Use question for one question, or questions for a related sequence with navigation and review. Users can select options, write custom answers, annotate any option independently, skip explicitly, or discard with saved partial input.",
+		promptSnippet: "Ask a question or related question chain before proceeding when user input is needed.",
 		promptGuidelines: [
-			"Ask exactly one question per tool call.",
-			"If you need answers to multiple questions, make multiple separate ask_user_question tool calls instead of combining them into one prompt.",
-			'Users will always be able to select "Other" to provide custom text input when options are provided.',
-			"Use multiSelect: true only when you need multiple answers to the same question.",
-			'If you recommend a specific option, make it the first option in the list and add "(Recommended)" at the end of the label.',
-			"Prefer this tool over guessing when requirements, preferences, or implementation choices are unclear.",
-			"Use this tool when multiple valid implementation paths exist and the preferred path depends on user choice.",
+			"Use exactly one input form: top-level question, or questions with unique ids.",
+			"Use a chain for related questions; ask unrelated questions separately.",
+			"Other is always available. Do not add a custom-input option yourself.",
+			"Use multiSelect only when multiple answers are appropriate.",
+			'Place recommended choices first and append "(Recommended)" to their labels.',
+			"Notes are independent annotations, not selections. Read notes on unselected options too.",
+			"A discarded or interrupted questionnaire returns saved partial input, not a completed confirmation. Do not infer missing answers or treat it as blanket approval.",
 		],
 		parameters: AskUserQuestionParams,
+		executionMode: "sequential",
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const options = normalizeOptions(params.options);
-			const context = params.details?.trim() || undefined;
-			const mode: AskUserQuestionMode = options.length === 0 ? "text" : params.multiSelect ? "multi-select" : "single-select";
-
-			if (signal?.aborted) {
-				return cancelledResult(params.question, mode, context);
+			const model = new Questionnaire(params);
+			let details: QuestionnaireResult;
+			if (signal?.aborted) details = model.result("cancelled");
+			else if (ctx.mode !== "tui" || !ctx.hasUI) {
+				details = model.result("unavailable", "ask_user_question requires interactive terminal UI; RPC and headless modes do not support this questionnaire.");
+			} else {
+				details = await withUiLock(model, signal, () => ctx.ui.custom<QuestionnaireResult>((tui, theme, _keybindings, done) =>
+					new QuestionnaireDialog(model, tui, theme, done, signal),
+				));
 			}
-
-			if (!ctx.hasUI) {
-				return unavailableResult(params.question, mode, "ask_user_question requires interactive mode UI", context);
-			}
-
-			return withUILock(async () => {
-				if (mode === "text") {
-					const editorTitle = context ? `${params.question}\n\n${context}` : params.question;
-					const answer = await ctx.ui.editor(editorTitle);
-					if (answer === undefined) {
-						return cancelledResult(params.question, mode, context);
-					}
-					return buildResult(params.question, context, mode, [
-						{ type: "text", label: answer.trim(), value: answer.trim() },
-					]);
-				}
-
-				if (mode === "single-select") {
-					const answer = await askSingleChoice(ctx, params.question, context, options);
-					if (!answer) {
-						return cancelledResult(params.question, mode, context);
-					}
-					return buildResult(params.question, context, mode, [answer]);
-				}
-
-				const answers = await askMultiChoice(ctx, params.question, context, options);
-				if (!answers) {
-					return cancelledResult(params.question, mode, context);
-				}
-				return buildResult(params.question, context, mode, answers);
-			});
+			return { content: [{ type: "text", text: formatQuestionnaireResult(details) }], details };
 		},
 
 		renderCall(args, theme) {
-			const options = normalizeOptions(args.options as Array<{ label: string; value?: string; description?: string }> | undefined);
-			let text = theme.fg("toolTitle", theme.bold("ask_user_question ")) + theme.fg("muted", args.question);
-			if (args.multiSelect) {
-				text += theme.fg("dim", " [multi-select]");
-			}
-			if (options.length > 0) {
-				const labels = [...options.map((option) => option.label), getOtherLabel(options)].join(", ");
-				text += `\n${theme.fg("dim", `  Options: ${labels}`)}`;
-			}
+			const questions = args.questions;
+			const title = typeof args.question === "string" ? args.question : (Array.isArray(questions) ? questions.map(question => typeof question?.header === "string" ? question.header : typeof question?.question === "string" ? question.question : "…").join(" · ") : "…");
+			let text = theme.fg("toolTitle", theme.bold("ask_user_question ")) + theme.fg("muted", safeQuestionText(title));
+			if (Array.isArray(questions)) text += theme.fg("dim", ` [${questions.length} questions]`);
+			else if (args.multiSelect) text += theme.fg("dim", " [multi-select]");
 			return new Text(text, 0, 0);
 		},
 
 		renderResult(result, _options, theme) {
-			const details = result.details as AskUserQuestionResultDetails | undefined;
-			if (!details) {
+			const details = result.details;
+			if (!details?.questions) {
+				// Older persisted results still have the single-question answer shape.
 				const first = result.content[0];
-				return new Text(first?.type === "text" ? first.text : "", 0, 0);
+				return new Text(safeQuestionText(first?.type === "text" ? first.text : ""), 0, 0);
 			}
-
-			if (details.status === "cancelled") {
-				return new Text(theme.fg("warning", details.message || "Cancelled"), 0, 0);
-			}
-
-			if (details.status === "unavailable") {
-				return new Text(theme.fg("warning", details.message || "ask_user_question unavailable"), 0, 0);
-			}
-
-			const lines = details.answers.map((answer) => {
-				switch (answer.type) {
-					case "text":
-						return `${theme.fg("success", "✓ ")}${theme.fg("accent", answer.label || "(empty response)")}`;
-					case "other":
-						return `${theme.fg("success", "✓ ")}${theme.fg("muted", "Other: ")}${theme.fg("accent", answer.label)}`;
-					case "option":
-						return `${theme.fg("success", "✓ ")}${theme.fg("accent", `${answer.index}. ${answer.label}`)}`;
+			const lines: string[] = [];
+			if (details.status !== "answered") lines.push(theme.fg("warning", safeQuestionText(details.message ?? (details.status === "discarded" ? "Discarded — returning saved answers and notes" : details.status === "cancelled" ? "Interrupted — returning saved answers and notes" : "Unavailable"))));
+			for (const question of details.questions) {
+				if (details.questions.length > 1) lines.push(theme.fg("muted", safeQuestionText(question.question)));
+				if (question.state !== "answered") lines.push(theme.fg("dim", question.state === "skipped" ? "↷ Skipped" : "○ Unanswered"));
+				for (const answer of question.answers) {
+					const label = answer.type === "option" ? `${answer.index}. ${answer.label}` : answer.type === "other" ? `Other: ${answer.label}` : answer.label || "(empty response)";
+					lines.push(theme.fg("success", "✓ ") + theme.fg("accent", safeQuestionText(label)));
 				}
-			});
+				for (const note of question.notes) lines.push(theme.fg("muted", safeQuestionText(`  ${note.label} [${note.selected ? "selected" : "not selected"}]: ${note.note}`)));
+			}
 			return new Text(lines.join("\n"), 0, 0);
 		},
-	});
+	};
+	pi.registerTool(tool);
 }
