@@ -126,7 +126,7 @@ Inside an inline editor:
 
 ## Submission and discard
 
-Normal submission requires every question to be answered or explicitly skipped. Review shows answered/skipped/unanswered states and all saved notes. It permits revision before submission.
+Normal submission requires every question to be answered or explicitly skipped. Review always opens with focus on the Submit row, so Enter submits once everything is answered or skipped. Review shows answered/skipped/unanswered states and all saved notes. It permits revision before submission.
 
 **Discard means "discarded, with partial input."** It is not `submitted_early` and does not forcibly stop the agent turn.
 

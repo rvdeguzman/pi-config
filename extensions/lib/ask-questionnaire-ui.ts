@@ -148,12 +148,18 @@ export class QuestionnaireDialog implements Component, Focusable {
 		return rows;
 	}
 
+	#showPage(page: number): void {
+		this.#page = page;
+		// Review always opens focused on Submit, which follows the per-question rows.
+		if (page === this.#model.questions.length) this.#cursors[page] = this.#model.questions.length;
+		this.#hint = undefined;
+		this.#followFocus = false;
+	}
+
 	#movePage(delta: number): void {
 		if (!this.#model.isChain) return;
 		const count = this.#model.questions.length + 1;
-		this.#page = (this.#page + delta + count) % count;
-		this.#hint = undefined;
-		this.#followFocus = false;
+		this.#showPage((this.#page + delta + count) % count);
 	}
 
 	#advance(): void {
@@ -162,11 +168,7 @@ export class QuestionnaireDialog implements Component, Focusable {
 			return;
 		}
 		if (!this.#model.isChain) this.#finish("answered");
-		else {
-			this.#page++;
-			this.#hint = undefined;
-			this.#followFocus = false;
-		}
+		else this.#showPage(this.#page + 1);
 	}
 
 	#edit(kind: EditKind, option = 0): void {

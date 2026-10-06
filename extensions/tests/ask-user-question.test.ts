@@ -204,7 +204,7 @@ test("review blocks unanswered questions; explicit skips permit submission and p
 	dialog.handleInput(key.left); // first
 	dialog.handleInput(key.enter); // answer first -> second
 	dialog.handleInput(key.right); // review
-	dialog.handleInput(key.enter); // cursor remains on submit
+	dialog.handleInput(key.enter); // review reopens focused on Submit
 	assert.equal(flow.result()?.status, "answered");
 	assert.equal(flow.result()?.questions[1].state, "skipped");
 	assert.deepEqual(flow.result()?.questions[1].answers, []);
@@ -216,14 +216,26 @@ test("review Enter revisits an answer and replacement preserves its unselected a
 	const dialog = flow.dialog;
 	dialog.handleInput("n"); type(dialog, "initial thought"); dialog.handleInput(key.enter);
 	dialog.handleInput(key.enter); // answer db
-	dialog.handleInput(key.enter); // answer scope -> review
+	dialog.handleInput(key.enter); // answer scope -> review, focused on Submit
+	dialog.handleInput(key.up); dialog.handleInput(key.up);
 	dialog.handleInput(key.enter); // review db
 	dialog.handleInput(key.down);
 	dialog.handleInput(key.enter); // change db
-	dialog.handleInput(key.right); // review
-	dialog.handleInput(key.down); dialog.handleInput(key.down); dialog.handleInput(key.enter);
+	dialog.handleInput(key.right); // review, focused on Submit
+	dialog.handleInput(key.enter);
 	assert.equal(flow.result()?.questions[0].answers[0].value, "pg");
 	assert.equal(flow.result()?.questions[0].notes[0].selected, false);
+});
+
+test("review opens focused on Submit, including after revisiting a question from review", () => {
+	const flow = ui(chain);
+	const dialog = flow.dialog;
+	dialog.handleInput(key.enter); // answer db
+	dialog.handleInput(key.enter); // answer scope -> review
+	dialog.handleInput(key.up); dialog.handleInput(key.up); dialog.handleInput(key.enter); // revisit db
+	dialog.handleInput("l"); dialog.handleInput("l"); // back to review
+	dialog.handleInput(key.enter);
+	assert.equal(flow.result()?.status, "answered");
 });
 
 test("ambiguous, empty, and malformed inputs fail before opening a popup", async () => {
@@ -380,7 +392,7 @@ test("hjkl navigates choices, questions and review without consuming letters in 
 	dialog.handleInput("h"); // revisit first
 	dialog.handleInput("l"); // return to second
 	dialog.handleInput("j"); dialog.handleInput(key.enter); // choose Shared -> review
-	dialog.handleInput("j"); dialog.handleInput("k"); // review navigation
+	dialog.handleInput("k"); dialog.handleInput("j"); dialog.handleInput("k"); dialog.handleInput("k"); // review navigation from Submit
 	dialog.handleInput(key.enter); // edit first answer
 	dialog.handleInput("k"); dialog.handleInput(key.enter); // change to SQLite
 	dialog.handleInput("l"); // review
