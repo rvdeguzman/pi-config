@@ -11,7 +11,6 @@
     {
       "source": "git:github.com/mitsuhiko/agent-stuff@122e2994adddb113c04764c5697217dae120fcc6",
       "extensions": [
-        "extensions/btw.ts",
         "extensions/files.ts"
       ],
       "skills": [],

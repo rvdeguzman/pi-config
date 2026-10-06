@@ -5,12 +5,18 @@ export PI_TEST_ENTRY
 
 .DEFAULT_GOAL := test
 
-.PHONY: test test-extensions smoke
+.PHONY: test test-extensions test-ask test-btw smoke
 
 test: test-extensions
 
 test-extensions:
 	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/*.test.ts extensions/openai-codex-priority/test.mjs
+
+test-ask:
+	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/ask-user-question.test.ts
+
+test-btw:
+	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/btw.test.ts
 
 smoke:
 	cd ../.. && PI_OFFLINE=1 $(NODE) --import ./extensions/tests/register-pi.mjs ./extensions/tests/smoke.mjs

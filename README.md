@@ -60,6 +60,59 @@ make packages
 A later `git pull` updates the example, not your live settings. Merge desired
 changes manually; setup intentionally does not reset local preferences.
 
+## Question UI
+
+The local `ask_user_question` extension supports individual questions and navigable
+question chains, with independent option notes, custom answers, explicit skips,
+and a final review. Press `n` to annotate an option without selecting it.
+Use `j`/`k` or Up/Down for choices, and `h`/`l`, Left/Right or Tab for questions.
+These letter shortcuts only navigate outside text editors; while editing, they
+insert ordinary text.
+Esc in an editor returns to the options; Esc outside editing discards the rest
+of the flow **with saved answers and notes**, rather than deleting partial input.
+
+Existing single-question calls remain supported. The approved interaction and
+result contracts are in [ASK-QUESTION-SPEC.md](ASK-QUESTION-SPEC.md).
+Run `/reload` in Pi after changing the extension.
+
+Verify question behavior without model requests or live credentials:
+
+```sh
+make -C extensions/tests test-ask
+```
+
+## BTW side questions
+
+The local `/btw` command is an OMP-style quick side question in the current view.
+It uses your current conversation/model, runs only the plugins you allowlist
+(none by default: answer-only), and keeps its history outside the main transcript.
+
+- `/btw QUESTION` starts a new topic; `/btw` opens history.
+- `c` copies, `f` asks a follow-up, `h` opens history, and `n` starts a new topic.
+- `j`/`k` or arrows scroll/select; PageUp/PageDown scroll longer answers.
+- `x` hides the reader while answering continues. Esc cancels and retains partial
+  output, or closes when idle. In the editor, Esc preserves the draft and letters
+  type normally.
+- `b` explicitly promotes a completed single answer into a new saved session
+  branch without another model call. The main conversation must still be idle at
+  the original leaf. Closing does not inject a summary or trigger the main agent.
+- **Plugins:** `/btw-plugins` picks which plugins (and built-in tools) BTW may
+  use; they're saved in ignored `btw.json`. With none, BTW stays answer-only.
+  With some, BTW runs a side agent loading only those plugins (tools and hooks).
+  Non-read-only calls ask in the panel: `y` once, `a` always, `n` decline.
+- Save failures remain visible; `r` retries. Existing saved BTW Q&A is preserved
+  as a legacy topic. History lives in ignored `btw-history/` machine state.
+
+The downloaded `agent-stuff` BTW extension is disabled in the live/example
+package allowlist; its file browser remains enabled. Details and limitations
+are in [BTW-SPEC.md](BTW-SPEC.md). Run `/reload` to activate changes.
+
+Verify without model requests or live credentials:
+
+```sh
+make -C extensions/tests test-btw
+```
+
 ## Verify bootstrap behavior
 
 ```sh
