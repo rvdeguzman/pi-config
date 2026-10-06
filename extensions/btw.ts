@@ -33,7 +33,7 @@ async function btwMode(ctx: ExtensionCommandContext): Promise<{ engine: BtwEngin
 		}),
 	};
 }
-import { BtwDialog, safeBtwText, type BtwDialogResult } from "./lib/btw-ui.ts";
+import { BTW_HEIGHT_RATIO, BtwDialog, safeBtwText, type BtwDialogResult } from "./lib/btw-ui.ts";
 
 interface SharedUiLock { withLock<T>(fn: () => T | Promise<T>): Promise<T> }
 const uiGlobals = globalThis as typeof globalThis & { __piSharedUiLock?: SharedUiLock };
@@ -147,7 +147,7 @@ export default function btw(pi: ExtensionAPI) {
 							}, done, topic?.id ?? side.activeTopic?.id);
 							closeDialog = () => dialog.close();
 							return dialog;
-						}, { overlay: true, overlayOptions: { anchor: "bottom-center", width: "90%", maxHeight: "80%", margin: 1 } });
+						}, { overlay: true, overlayOptions: { anchor: "top-center", width: "90%", maxHeight: `${BTW_HEIGHT_RATIO * 100}%`, margin: 1 } });
 					});
 				} finally { if (dialogOwner === owner) closeDialog = undefined; }
 				if (result.action !== "branch" || epoch !== generation) return;

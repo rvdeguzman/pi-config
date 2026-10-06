@@ -1,5 +1,5 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, Editor, Key, Markdown, matchesKey, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, Editor, Key, Markdown, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import { BtwSession, type BtwTopic } from "./btw-session.ts";
 
 export type BtwDialogResult = { action: "close" } | { action: "branch"; topic: BtwTopic };
@@ -12,6 +12,9 @@ interface BtwDialogActions {
 export function safeBtwText(text: string): string {
 	return stripTerminalSequences(text).replace(/\t/g, "    ").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 }
+
+/** Fraction of terminal rows the overlay may use; the rest keeps the main conversation visible. */
+export const BTW_HEIGHT_RATIO = 0.6;
 
 /** Small focused reader/history overlay. Text editing is a distinct mode, never a hotkey trap. */
 export class BtwDialog implements Component, Focusable {
@@ -155,7 +158,29 @@ export class BtwDialog implements Component, Focusable {
 
 	render(width: number): string[] {
 		width = Math.max(1, width);
-		const height = Math.max(4, Math.floor((this.tui.terminal.rows || 24) * 0.75));
+		// Leave the bottom of the screen (latest prompt, editor, status) visible; see btw.ts overlay options.
+		const height = Math.max(4, Math.floor((this.tui.terminal.rows || 24) * BTW_HEIGHT_RATIO) - 1);
+		// Too narrow for a frame: fall back to plain lines.
+		if (width < 12) {
+			const { title, body, bottom } = this.#renderContent(width, height);
+			const rule = this.theme.fg("dim", "─".repeat(width));
+			return [this.theme.fg("accent", title), rule, ...body, rule, ...bottom].map(line => truncateToWidth(line, width, ""));
+		}
+		const inner = width - 4;
+		const { title, body, bottom } = this.#renderContent(inner, height);
+		const border = (text: string) => this.theme.fg("borderAccent", text);
+		const row = (line: string) => `${border("│")} ${truncateToWidth(line, inner, "", true)} ${border("│")}`;
+		const label = truncateToWidth(` ${title} `, width - 4, "");
+		return [
+			`${border("╭─")}${this.theme.fg("accent", label)}${border("─".repeat(Math.max(0, width - 3 - visibleWidth(label))) + "╮")}`,
+			...body.map(row),
+			border(`├${"─".repeat(width - 2)}┤`),
+			...bottom.map(row),
+			border(`╰${"─".repeat(width - 2)}╯`),
+		].map(line => truncateToWidth(line, width, ""));
+	}
+
+	#renderContent(width: number, height: number): { title: string; body: string[]; bottom: string[] } {
 		const topic = this.topic;
 		const latest = topic?.turns.at(-1);
 		const title = this.#editing ? this.#editing.topicId ? "BTW · follow-up" : "BTW · new question" : this.#history ? "BTW · history" : `BTW · ${latest?.status ?? "answer"}`;
@@ -171,11 +196,11 @@ export class BtwDialog implements Component, Focusable {
 		const notice = this.session.storageError ? `Not saved: ${this.session.storageError}` : this.session.cleanupError ? `Provider cleanup failed: ${this.session.cleanupError}` : this.#hint;
 		const noticeBudget = Math.max(0, Math.min(4, height - 4 - footer.length));
 		const notices = [...approvalLines, ...(notice ? wrapTextWithAnsi(this.theme.fg("warning", safeBtwText(notice)), width) : [])].slice(0, noticeBudget);
-		const lines = [this.theme.fg("accent", truncateToWidth(title, width, "")), this.theme.fg("dim", "─".repeat(width))];
+		const lines: string[] = [];
 		if (this.#editing) {
 			// Editor's internal layout needs a minimum width for wide graphemes.
 			const editorLines = this.#editor!.render(Math.max(8, width)).map(line => truncateToWidth(line, width, ""));
-			const budget = Math.max(1, height - lines.length - footer.length - notices.length - 1);
+			const budget = Math.max(1, height - 3 - footer.length - notices.length);
 			const cursor = Math.max(0, editorLines.findIndex(line => line.includes(CURSOR_MARKER)));
 			const offset = Math.max(0, Math.min(cursor - budget + 1, editorLines.length - budget));
 			lines.push(...editorLines.slice(offset, offset + budget));
@@ -201,7 +226,6 @@ export class BtwDialog implements Component, Focusable {
 			this.#scroll = Math.max(0, Math.min(this.#scroll, body.length - this.#bodyHeight));
 			lines.push(...body.slice(this.#scroll, this.#scroll + this.#bodyHeight));
 		}
-		lines.push(this.theme.fg("dim", "─".repeat(width)), ...notices, ...footer);
-		return lines.map(line => truncateToWidth(line, width, ""));
+		return { title: truncateToWidth(title, width, ""), body: lines.map(line => truncateToWidth(line, width, "")), bottom: [...notices, ...footer].map(line => truncateToWidth(line, width, "")) };
 	}
 }

@@ -13,8 +13,10 @@ vendored.
   level. It can run while the main agent is working.
 - `/btw` opens this session's history. If a side request is still running, it
   reopens that answer instead.
-- The reader is a focused bottom-centered overlay. It does not replace the main
-  editor or modify its draft. `x` hides the overlay and returns to the main task
+- The reader is a focused, bordered overlay anchored near the top of the screen
+  and capped at 60% of the terminal height, so the latest prompt, editor, and
+  status stay visible below it. It does not replace the main editor or modify
+  its draft. `x` hides the overlay and returns to the main task
   while an answer continues in the background.
 - One side request at a time; another question is refused rather than queued.
 - The question and visible answer are scrollable. Streaming follows the tail
