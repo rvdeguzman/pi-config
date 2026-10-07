@@ -105,6 +105,7 @@ export function createFakeHerdr(options: FakeHerdrOptions = {}): FakeHerdr {
 				}
 			}
 			calls.push(args);
+			if (args[0] === "--version") return { code: 0, stdout: "herdr 0.9.3\n", stderr: "", killed: false };
 			const [group, action] = args;
 			if (group === "workspace" && action === "create") {
 				const workspaceId = `w${++workspaces}`;

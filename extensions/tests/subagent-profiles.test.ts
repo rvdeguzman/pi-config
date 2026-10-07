@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { FileProfileRegistry, parseAgentProfile } from "../lib/subagent-profiles.ts";
-import { isRetryableProviderFailure } from "../herdr-subagent.ts";
+import { isRetryableProviderFailure } from "../subagent.ts";
 
 test("profile parser accepts string and ordered array models", () => {
 	assert.deepEqual(

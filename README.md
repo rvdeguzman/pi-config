@@ -113,6 +113,28 @@ Verify without model requests or live credentials:
 make -C extensions/tests test-btw
 ```
 
+## Subagents
+
+The model delegates with `subagent` (blocking) and `subagent_async`
+(background; the result is steered back). Typing `&scout`, `&worker`, … asks for
+an async child with that profile from `agents/*.md`. Each child runs in a
+visible target: a Herdr tab when Pi runs inside Herdr, otherwise a tmux window
+(the current tmux session, or a detached `pi-subagents` session). Results print
+exact attach/capture/close commands.
+
+- `/subagent-backend [auto|herdr|tmux]` shows or persists the backend (ignored
+  `subagents.json`); `PI_SUBAGENT_BACKEND` overrides it per process. Changes
+  affect new runs only.
+- `/subagent-prune [days]` removes old run directories.
+- tmux cannot see whether a child is waiting for input; attach if it stalls.
+
+Details are in [SUBAGENT-SPEC.md](SUBAGENT-SPEC.md). Verify without model
+requests (the tmux tests use an isolated tmux server and a stub `pi`):
+
+```sh
+make -C extensions/tests test-subagents
+```
+
 ## Verify bootstrap behavior
 
 ```sh
