@@ -7,6 +7,9 @@
  * State is a persisted custom entry on the session branch, so navigating the
  * tree or forking follows the branch: an abandoned branch's toggles never
  * affect the active one.
+ *
+ * `/goal` (lib/euler-goal.ts) keeps Euler working until a check passes; its
+ * policy lives beside SKILL.md in goal.md and away.md.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -14,6 +17,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { getAgentDir, stripFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+import { registerGoal } from "./lib/euler-goal.ts";
 
 const ENTRY_TYPE = "euler";
 const STATUS_KEY = "euler";
@@ -84,6 +89,8 @@ export default function euler(pi: ExtensionAPI): void {
 		if (ctx.isIdle()) pi.sendUserMessage(input);
 		else pi.sendUserMessage(input, { deliverAs: "followUp" });
 	};
+
+	registerGoal(pi, { skillDir: SKILL_DIR, enableEuler: (ctx) => setActive(ctx, true) });
 
 	for (const name of ["e", "euler"]) {
 		pi.registerCommand(name, {

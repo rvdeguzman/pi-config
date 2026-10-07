@@ -42,7 +42,21 @@ While active:
 
 - Add the Euler body to the system prompt before each agent run, preferring structured system-prompt sections over replacing the complete prompt.
 - Show a compact `euler` status indicator in TUI mode.
-- Do not add Euler-specific model tools, model routing, todo machinery, mandatory subagents, or another workflow engine.
+- Do not add Euler-specific model tools, model routing, todo machinery, mandatory subagents, or another workflow engine. `/goal` is the one exception: `goal_checkpoint` exists only while a goal is active.
+
+### Goals
+
+Files: `extensions/lib/euler-goal.ts` (registered by `euler.ts`), policy in `skills/euler/goal.md` and `skills/euler/away.md`, tests in `extensions/tests/euler-goal.test.ts` (a real Pi session against a scripted model).
+
+- `/goal <objective> [--until "<check>"] [--max N] [--away]` turns Euler on and submits the objective. `/goal`/`/goal status`, `/goal stop`, and `/goal resume` manage it.
+- An iteration is one reply. At `agent_before_settle` the extension runs the check and either ends the goal or appends an iteration message with the output tail and continues. The check is the only proof of done when present; the agent's `done` checkpoint is advisory. Without a check, the agent's `done` ends the goal.
+- Checks run as `bash -c` in the session cwd, in their own process group, with a 20-minute timeout: SIGTERM to the group, then SIGKILL after 5 seconds. Only a normal exit with code 0 passes; a signal, timeout, or abort never does. Leftover processes in the group are terminated when the check exits.
+- A goal ends on: check passes, `blocked` checkpoint, iteration budget, a model or provider error, `/goal stop`, or Esc. Esc and `/goal stop` also kill a running check, including the startup check.
+- A goal is live only while this process runs it. A run that settles with the goal still live (Esc, invalid continuation) ends it as interrupted. A goal rebuilt from history is never live: `/tree` into an old goal does not revive it, and a goal cut off by a crash is recorded as interrupted at the next session start. `/goal resume` restarts it.
+- Starting refuses a check that already passes, and an away goal without a check.
+- Away goals hide `ask_user_question` and block calls to it, including indirect `executeTool()` calls, until the run settles, report turn included. Its prior state is restored afterward. Branch, no-push, and report rules are prompt policy in `away.md`.
+- State is branch-scoped: start and end custom entries, iteration custom messages, and `goal_checkpoint` tool results. Summaries and `/goal` show the per-iteration log from those entries; there is no separate log file.
+- Out of scope: timed or event wake-ups (`/loop`), worktree creation, push/merge automation, cross-model review of the log.
 
 ### Behavior contract
 

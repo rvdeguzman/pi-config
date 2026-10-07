@@ -22,8 +22,9 @@ test-btw:
 test-subagents:
 	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/subagent*.test.ts
 
+# Euler mode and /goal (a real Pi session against a scripted model).
 test-euler:
-	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/euler.test.ts
+	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/euler*.test.ts
 
 test-recall:
 	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/recall.test.ts

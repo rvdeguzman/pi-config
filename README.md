@@ -126,6 +126,28 @@ pstack without installing it; provenance is in
 [skills/euler/UPSTREAM.md](skills/euler/UPSTREAM.md), design in
 [EULER-SPEC.md](EULER-SPEC.md).
 
+### Goals
+
+`/goal <objective> --until "<check>" [--max N]` turns Euler on and keeps the
+agent working across replies until the check command exits 0. Pi runs the
+check after every reply and feeds a failure's output into the next iteration;
+the agent's own "done" never ends a goal that has a check. A goal also ends
+when the agent reports it is blocked, at the iteration budget (default 10, or
+5 without a check), on Esc, or with `/goal stop`. `/goal` shows the goal and
+its per-iteration log; `/goal resume` restarts the last one. A check that
+already passes is refused, since it could never say when the goal is done.
+
+Add `--away` when you are leaving (an away goal requires `--until`):
+`ask_user_question` is hidden and blocked, the agent works on a `goal/<name>`
+branch, never pushes, merges, or deploys, and finishes with a report whose
+**Attention** list names the decisions worth checking. The footer shows
+`goal 3/10`. Rules live in [skills/euler/goal.md](skills/euler/goal.md) and
+[skills/euler/away.md](skills/euler/away.md).
+
+```text
+/goal --away get demo1 to its first frame; don't touch the renderer API --until "make verify-demo1" --max 20
+```
+
 ## Subagents
 
 The model delegates with `subagent` (blocking) and `subagent_async`

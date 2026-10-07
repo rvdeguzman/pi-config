@@ -9,12 +9,16 @@ const { default: euler } = await import("../euler.ts");
 
 function harness() {
 	const session = SessionManager.inMemory(process.cwd());
-	const handlers = new Map<string, (event: any, ctx: any) => any>();
+	const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
 	const commands = new Map<string, any>();
 	const sent: Array<{ text: string; options?: unknown }> = [];
 	const statuses: Array<string | undefined> = [];
 	euler({
-		on: (event: string, handler: any) => handlers.set(event, handler),
+		on: (event: string, handler: any) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+		registerTool: () => undefined,
+		registerMessageRenderer: () => undefined,
+		getActiveTools: () => [],
+		setActiveTools: () => undefined,
 		registerCommand: (name: string, definition: any) => commands.set(name, definition),
 		appendEntry: (type: string, data: unknown) => session.appendCustomEntry(type, data),
 		sendUserMessage: (text: string, options?: unknown) => sent.push({ text, options }),
@@ -28,10 +32,13 @@ function harness() {
 	/** The Euler section the next agent run would get, if any. */
 	const prompt = async () => {
 		const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
-		await handlers.get("before_agent_start")!(event, ctx);
+		await emit("before_agent_start", event);
 		return event.systemPromptOptions.sections.euler;
 	};
-	return { session, commands, sent, statuses, ctx, prompt, handlers };
+	async function emit(name: string, event: unknown) {
+		for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
+	}
+	return { session, commands, sent, statuses, ctx, prompt, emit };
 }
 
 test("/e <task> turns Euler on for the branch and submits the task once; /euler off turns it off", async () => {
@@ -67,14 +74,14 @@ test("approved preferences from /corrections reach the Euler prompt", async () =
 });
 
 test("Euler state follows the active session branch; abandoned branches do not leak into it", async () => {
-	const { session, commands, ctx, prompt, handlers } = harness();
+	const { session, commands, ctx, prompt, emit } = harness();
 	const root = session.appendMessage({ role: "user", content: "start", timestamp: 1 } as any);
 
 	await commands.get("e").handler("", ctx);
 	assert.ok(await prompt());
 
 	session.branch(root); // e.g. /tree back to before /e
-	await handlers.get("session_tree")!({}, ctx);
+	await emit("session_tree", {});
 	assert.equal(await prompt(), undefined, "a sibling branch without the toggle is plain");
 
 	await commands.get("e").handler("", ctx);

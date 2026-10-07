@@ -53,13 +53,19 @@ export function formatTokens(count: number | null | undefined) {
 	return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
+/** Euler's footer markers: a fixed "euler" word, then the goal's plain-text progress. */
+export function modeMarkers(statuses: ReadonlyMap<string, string> | undefined) {
+	if (!statuses) return "";
+	return [statuses.has("euler") ? "euler" : "", statuses.get("euler-goal") ?? ""].filter(Boolean).join(" · ");
+}
+
 export function formatFooter(
 	ctx: ExtensionContext,
 	width: number,
 	priorityEnabled: boolean,
 	quota: QuotaValue = "",
 	gitBranch: string | null = null,
-	/** Active mode marker (e.g. "euler"), shown before the model. */
+	/** Active mode markers (e.g. "euler · goal 3/10"), shown before the model. */
 	mode = "",
 ) {
 	let cacheHitRate: number | undefined;
@@ -130,8 +136,8 @@ export default function minimalFooter(pi: ExtensionAPI) {
 						priorityEnabled,
 						quota,
 						footerData?.getGitBranch() ?? null,
-						// This footer replaces the built-in one, so surface Euler's setStatus marker here.
-						footerData?.getExtensionStatuses?.().has("euler") ? "euler" : "",
+						// This footer replaces the built-in one, so surface Euler's setStatus markers here.
+						modeMarkers(footerData?.getExtensionStatuses?.()),
 					).map((line) =>
 						theme.fg("dim", line),
 					),
