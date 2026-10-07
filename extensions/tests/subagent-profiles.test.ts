@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { FileProfileRegistry, parseAgentProfile } from "../lib/subagent-profiles.ts";
-import { isRetryableProviderFailure } from "../subagent.ts";
+import { isFallbackFailure } from "../subagent.ts";
 
 test("profile parser accepts string and ordered array models", () => {
 	assert.deepEqual(
@@ -49,11 +49,14 @@ test("registry refreshes files and reports unknown and duplicate names", async (
 	}
 });
 
-test("fallback classification advances only provider failures", () => {
-	assert.equal(isRetryableProviderFailure({ failureKind: "provider" } as any), true);
-	assert.equal(isRetryableProviderFailure({ failureKind: "tool" } as any), false);
-	assert.equal(isRetryableProviderFailure({ failureKind: "task" } as any), false);
-	assert.equal(isRetryableProviderFailure({ failureKind: "abort" } as any), false);
-	assert.equal(isRetryableProviderFailure(new Error("provider startup failed: 429")), true);
-	assert.equal(isRetryableProviderFailure(new Error("tests failed")), false);
+test("fallback advances on every final failure except cancellation", () => {
+	for (const failureKind of ["provider", "tool", "task", undefined]) {
+		assert.equal(isFallbackFailure({ status: "failed", failureKind } as any), true);
+		assert.equal(isFallbackFailure({ status: "completed", failureKind } as any), false);
+	}
+	assert.equal(isFallbackFailure({ status: "failed", failureKind: "abort" } as any), false);
+	assert.equal(isFallbackFailure({ status: "failed", stopReason: "aborted" } as any), false);
+	assert.equal(isFallbackFailure(new Error("provider startup failed: 429")), true);
+	assert.equal(isFallbackFailure(new Error("tests failed")), true);
+	assert.equal(isFallbackFailure(new Error("Child Pi exited before reporting a result")), true);
 });

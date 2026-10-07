@@ -44,7 +44,6 @@ import { Type } from "typebox";
 import { createAgentRefAutocomplete } from "./lib/agent-ref-autocomplete.ts";
 import {
 	BACKEND_ENV,
-	ChildStartupError,
 	commandsFor,
 	configuredBackend,
 	HerdrBackend,
@@ -679,14 +678,10 @@ function isSameOrDescendant(base: string, candidate: string): boolean {
 	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-export function isRetryableProviderFailure(value: ChildResult | Error | string): boolean {
-	if (typeof value === "object" && value !== null && !(value instanceof Error)) {
-		return value.failureKind === "provider";
-	}
-	const message = typeof value === "string" ? value : value.message;
-	return /(?:\b401\b|\b403\b|\b429\b|\b5\d\d\b|rate.?limit|temporar(?:y|ily)|provider.*(?:startup|unavailable)|unknown (?:provider|model)|authentication|unauthori[sz]ed|model.*(?:not found|unavailable)|connection (?:refused|reset)|timed? out)/i.test(
-		message,
-	);
+/** Final failures advance to the next model; explicit cancellation does not. */
+export function isFallbackFailure(value: ChildResult | Error): boolean {
+	if (value instanceof Error) return true;
+	return value.status === "failed" && value.failureKind !== "abort" && value.stopReason !== "aborted";
 }
 
 /** Profile `tools` token that grants every extension-registered tool. */
@@ -1269,13 +1264,11 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				}
 
 				const hasNext = index + 1 < candidates.length;
-				const retryable =
-					hasNext &&
-					(result
-						? result.status === "failed" && isRetryableProviderFailure(result)
-						: failure instanceof ChildStartupError ||
-							(failure !== undefined && !(failure instanceof ChildExitedError) && isRetryableProviderFailure(failure)));
-				if (retryable) {
+				// The child reports only after Pi settles, including its internal retries.
+				// Do not add retries here: any final failure advances one model candidate.
+				const shouldFallback = hasNext &&
+					(result ? isFallbackFailure(result) : failure !== undefined && isFallbackFailure(failure));
+				if (shouldFallback) {
 					if (record.handle) {
 						if (worktree) live.pending.push(record.handle);
 						else await closeTarget(backend, record.handle);

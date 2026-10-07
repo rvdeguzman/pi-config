@@ -276,27 +276,93 @@ test("subagent_async returns immediately and steers eventual completion or failu
 	}
 });
 
-test("async runs fall back to the next model only on retryable provider failures", async () => {
-	const herdr = createFakeHerdr({
-		onPrompt: (launch, fake) => {
-			const model = launch.argv![launch.argv!.indexOf("--model") + 1];
-			const result =
-				model === "first"
-					? { status: "failed", output: "", error: "429 rate limited", failureKind: "provider" }
-					: { output: `answer from ${model}` };
-			setTimeout(() => void fake.complete(launch, result), 30);
-		},
-	});
+for (const toolName of ["subagent", "subagent_async"]) {
+	for (const failureKind of ["provider", "tool", "task", undefined]) {
+		test(`${toolName} falls back after a final ${failureKind ?? "unclassified"} failure`, async () => {
+			const herdr = createFakeHerdr({
+				onPrompt: (launch, fake) => {
+					const model = launch.argv![launch.argv!.indexOf("--model") + 1];
+					const result = model === "first"
+						? { status: "failed", output: "", error: "something went wrong", failureKind }
+						: { output: `answer from ${model}` };
+					setTimeout(() => void fake.complete(launch, result), 30);
+				},
+			});
+			const { tools, messages, ctx, handlers } = harness(herdr);
+			try {
+				const result = await tools.get(toolName).execute("fallback", { agent: "fallback", task: "look" }, undefined, undefined, ctx);
+				if (toolName === "subagent_async") await waitFor(() => messages.length === 1);
+				const text = toolName === "subagent_async" ? messages[0]!.message.content : result.content[0].text;
+				assert.equal(herdr.launches.length, 2, "one launch per model, no added retries");
+				assert.match(text, /completed/);
+				assert.match(text, /answer from second/);
+				assert.ok(herdr.closedTabs.includes(herdr.launches[0]!.tabId));
+			} finally {
+				await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
+			}
+		});
+	}
+}
+
+test("fallback waits for the child's final result, not its internal retries", async () => {
+	const herdr = createFakeHerdr({ onPrompt: () => undefined });
 	const { tools, messages, ctx, handlers } = harness(herdr);
 	try {
-		await tools.get("subagent_async").execute("fallback", { agent: "fallback", task: "look" }, undefined, undefined, ctx);
+		await tools.get("subagent_async").execute("waiting", { agent: "fallback", task: "look" }, undefined, undefined, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.equal(herdr.launches.length, 1);
+		assert.equal(messages.length, 0);
+		await herdr.complete(herdr.launches[0]!, { status: "failed", error: "internal retries exhausted", failureKind: "task" });
+		await waitFor(() => herdr.launches.length === 2);
+		await herdr.complete(herdr.launches[1]!, { output: "fallback answer" });
 		await waitFor(() => messages.length === 1);
-		assert.equal(herdr.launches.length, 2);
-		assert.match(messages[0]!.message.content, /completed/);
-		assert.match(messages[0]!.message.content, /answer from second/);
+		assert.match(messages[0]!.message.content, /fallback answer/);
 	} finally {
 		await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
 	}
+});
+
+for (const failure of [
+	{ failureKind: "abort", stopReason: "aborted" },
+	{ stopReason: "aborted" },
+]) {
+	test(`explicit cancellation does not trigger fallback (${JSON.stringify(failure)})`, async () => {
+		const herdr = createFakeHerdr({
+			onPrompt: (launch, fake) => fake.complete(launch, { status: "failed", error: "Interrupted", ...failure }),
+		});
+		const { tools, ctx } = harness(herdr);
+		await assert.rejects(
+			tools.get("subagent").execute("abort", { agent: "fallback", task: "look" }, undefined, undefined, ctx),
+			/Interrupted/,
+		);
+		assert.equal(herdr.launches.length, 1);
+	});
+}
+
+test("fallback stops after all configured models fail", async () => {
+	const herdr = createFakeHerdr({
+		onPrompt: (launch, fake) => fake.complete(launch, { status: "failed", error: "task failed", failureKind: "task" }),
+	});
+	const { tools, ctx } = harness(herdr);
+	await assert.rejects(
+		tools.get("subagent").execute("exhausted", { agent: "fallback", task: "look" }, undefined, undefined, ctx),
+		/error: task failed/i,
+	);
+	assert.equal(herdr.launches.length, 2);
+	assert.ok(herdr.launches[1]!.argv!.includes("second"));
+});
+
+test("a child that exits without a result falls back to the next model", async () => {
+	const herdr = createFakeHerdr({
+		onPrompt: (launch, fake) => {
+			if (launch.argv!.includes("first")) launch.exited = true;
+			else void fake.complete(launch, { output: "recovered from crash" });
+		},
+	});
+	const { tools, ctx } = harness(herdr);
+	const result = await tools.get("subagent").execute("crash", { agent: "fallback", task: "look" }, undefined, undefined, ctx);
+	assert.equal(herdr.launches.length, 2);
+	assert.match(result.content[0].text, /recovered from crash/);
 });
 
 test("a child that fails to start falls back to the next model", async () => {

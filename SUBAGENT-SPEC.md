@@ -84,10 +84,10 @@ Rules:
 - A string selects that model.
 - An array tries candidates in order.
 - A missing model inherits the caller's active model.
-- Fallback occurs only for retryable provider failures such as rate limiting, temporary unavailability, authentication/provider startup failure, or a model being unavailable. A child Pi that exits before it is ready (Herdr) or before it submits its task (tmux) counts as a startup failure.
+- Fallback occurs for any final failed attempt, including provider, task, tool, startup, and unexpected child-exit errors. Wait for the child's final settled result after Pi exhausts its internal retries; the runner adds no same-model retries.
 - Every fallback attempt uses the run's persisted backend.
 - Fallback applies to blocking and async runs.
-- Task errors, tool failures, invalid configuration, explicit aborts, and user cancellation do not advance to another model.
+- Explicit aborts and user cancellation do not advance to another model. Invalid profile/tool configuration and backend preflight failures are rejected before launching any attempt.
 - `thinking` applies to every candidate and is clamped by the selected model's capabilities.
 - A missing `thinking` value inherits the caller's current thinking level.
 
@@ -244,7 +244,7 @@ Outside a Git repository, the run proceeds in place and the result says so. Para
 
 ## Per tool
 
-- `subagent`: launch, monitor, settle, and return the bounded result. Progress updates include the attach and capture commands. Retryable failures move to the next model candidate in a fresh target on the same backend.
+- `subagent`: launch, monitor, settle, and return the bounded result. Progress updates include the attach and capture commands. Any final failure other than cancellation moves to the next model candidate in a fresh target on the same backend, without adding same-model retries.
 - `subagent_async`: return the run id and attach/capture commands once the first child is running. A session-scoped monitor tracks it in the parent widget, auto-closes the target, and injects a visible `subagent-async-result` custom message with `deliverAs: "steer"` and `triggerTurn: true`.
 
 ## Run records and retention
@@ -283,8 +283,8 @@ The exact module split may change, but profile parsing and autocomplete must sha
 Add focused tests for:
 
 - String and array model parsing.
-- Ordered fallback on retryable provider failure.
-- No fallback on task/tool failure or abort.
+- Ordered fallback on provider, task, tool, unclassified, startup, and unexpected child-exit failures.
+- Fallback waits for the final result; no added same-model retries, no fallback on abort, and no attempts beyond the configured model list.
 - Inherited model and thinking behavior.
 - Tool allowlist validation and removal of both delegation tools.
 - Immediate `subagent_async` dispatch followed by one automatic steer delivery when its result appears.
@@ -308,7 +308,7 @@ Add focused tests for:
 
 - The parent invokes a named blocking or asynchronous profile and supplies only the complete task and optional working directory.
 - Profiles contain only `name`, `model`, `thinking`, `tools`, and `worktree` frontmatter.
-- Ordered model fallback works only for retryable provider or startup failures, in blocking and async calls.
+- Ordered model fallback works for every final failed attempt except cancellation, in blocking and async calls; Pi's internal retries are unchanged and the runner adds no same-model retries.
 - Isolated profiles never write to the parent checkout, and their commits are reported as a branch for the parent to integrate.
 - Async runs survive `/reload`.
 - The parent can launch as many sibling calls as it chooses without an extension-wide serial queue.
