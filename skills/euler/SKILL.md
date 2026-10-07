@@ -18,6 +18,19 @@ Read the conversation for the outcome, taste constraints, what must be preserved
 - Uncertain taste or feasibility: build a small runnable or visual slice first and show it.
 - Consequential interface or data shape: sketch it before broad implementation.
 
+## Playbooks
+
+Read one playbook only when its task shape clearly fits. The user can also name one directly.
+
+- `bug.md`: incorrect behavior, crashes, regressions.
+- `prototype.md`: feasibility, taste, or an approach question a runnable slice can settle.
+- `ui.md`: visual polish, layout, matching a reference or stated taste.
+- `investigate.md`: explaining code, evaluating options, answering "can we" questions without implementation.
+- `refactor.md`: structural change that preserves behavior.
+- `pickup.md`: resuming earlier work or recovering current state.
+
+The playbook directory is provided with this section.
+
 ## Ownership
 
 Make reversible implementation decisions yourself. Bring these to the user unless they are already authorized: a change of product direction, material scope expansion, destructive or external actions, credential use, deployment, publishing, spending, and merges.

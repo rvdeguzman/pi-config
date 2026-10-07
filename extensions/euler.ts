@@ -18,7 +18,9 @@ import { stripFrontmatter, type ExtensionAPI, type ExtensionContext } from "@ear
 const ENTRY_TYPE = "euler";
 const STATUS_KEY = "euler";
 const SECTION = "euler";
-const SKILL_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "euler", "SKILL.md");
+const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "euler");
+const SKILL_PATH = join(SKILL_DIR, "SKILL.md");
+const PLAYBOOK_DIR = join(SKILL_DIR, "playbooks");
 
 interface BranchEntry {
 	type: string;
@@ -55,7 +57,8 @@ export default function euler(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!active(ctx)) return;
 		// Read per run so edits to SKILL.md apply without /reload.
-		event.systemPromptOptions.sections[SECTION] = stripFrontmatter(readFileSync(SKILL_PATH, "utf8")).trim();
+		const body = stripFrontmatter(readFileSync(SKILL_PATH, "utf8")).trim();
+		event.systemPromptOptions.sections[SECTION] = `${body}\n\nPlaybook directory: ${PLAYBOOK_DIR}`;
 	});
 
 	const handler = async (args: string, ctx: ExtensionContext) => {

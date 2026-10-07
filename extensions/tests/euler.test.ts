@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -42,6 +44,8 @@ test("/e <task> turns Euler on for the branch and submits the task once; /euler 
 	const section = await prompt();
 	assert.match(section!, /^# Euler/);
 	assert.doesNotMatch(section!, /disable-model-invocation/, "frontmatter stays out of the prompt");
+	const playbookDir = section!.match(/^Playbook directory: (.+)$/m)?.[1];
+	assert.ok(playbookDir && existsSync(join(playbookDir, "bug.md")), "Euler can locate its playbooks");
 
 	await commands.get("euler").handler("off", ctx);
 	assert.equal(await prompt(), undefined);
