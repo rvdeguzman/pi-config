@@ -59,6 +59,8 @@ export function formatFooter(
 	priorityEnabled: boolean,
 	quota: QuotaValue = "",
 	gitBranch: string | null = null,
+	/** Active mode marker (e.g. "euler"), shown before the model. */
+	mode = "",
 ) {
 	let cacheHitRate: number | undefined;
 
@@ -82,7 +84,7 @@ export function formatFooter(
 		(model?.provider === "openai" || model?.provider === "openai-codex") && priorityEnabled ? " fast" : "";
 	const thinking = model?.reasoning ? ` ${ctx.thinkingLevel ?? "off"}` : "";
 	const left = `${cache} ${tokens} ${percent}`;
-	const right = `${model?.id ?? "no-model"}${fast}${thinking}`;
+	const right = `${mode ? `${mode} · ` : ""}${model?.id ?? "no-model"}${fast}${thinking}`;
 	const shownRight = truncateToWidth(right, width, "");
 	const shownCwd = truncateToWidth(cwd, Math.max(0, width - visibleWidth(shownRight) - 2), "");
 	const topPadding = " ".repeat(Math.max(0, width - visibleWidth(shownCwd) - visibleWidth(shownRight)));
@@ -122,7 +124,15 @@ export default function minimalFooter(pi: ExtensionAPI) {
 				},
 				invalidate() {},
 				render: (width) =>
-					formatFooter(ctx, width, priorityEnabled, quota, footerData?.getGitBranch() ?? null).map((line) =>
+					formatFooter(
+						ctx,
+						width,
+						priorityEnabled,
+						quota,
+						footerData?.getGitBranch() ?? null,
+						// This footer replaces the built-in one, so surface Euler's setStatus marker here.
+						footerData?.getExtensionStatuses?.().has("euler") ? "euler" : "",
+					).map((line) =>
 						theme.fg("dim", line),
 					),
 			};
