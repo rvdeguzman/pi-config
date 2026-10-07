@@ -113,6 +113,42 @@ Verify without model requests or live credentials:
 make -C extensions/tests test-btw
 ```
 
+## Euler mode
+
+`/e <task>` (alias `/euler`) turns on Euler for the current session branch and
+sends the task: state the outcome and constraints once, and the agent owns
+reversible execution choices, keeps the build small, and picks checks that
+actually discriminate. `/e` alone turns it on, `/e off` turns it off, and
+`/e status` reports it. While on, the footer shows `euler` and the
+instructions from [skills/euler/SKILL.md](skills/euler/SKILL.md) join the
+system prompt. The state follows `/tree` and forks. It adapts ideas from
+pstack without installing it; provenance is in
+[skills/euler/UPSTREAM.md](skills/euler/UPSTREAM.md), design in
+[EULER-SPEC.md](EULER-SPEC.md).
+
+## Subagents
+
+The model delegates with `subagent` (blocking) and `subagent_async`
+(background; the result is steered back). Typing `&scout`, `&worker`, … asks for
+an async child with that profile from `agents/*.md`. Each child runs in a
+visible target: a Herdr tab when Pi runs inside Herdr, otherwise a tmux window
+(the current tmux session, or a detached `pi-subagents` session). Results print
+exact attach/capture/close commands.
+
+- `/subagent-backend [auto|herdr|tmux]` shows or persists the backend (ignored
+  `subagents.json`); `PI_SUBAGENT_BACKEND` overrides it per process. Changes
+  affect new runs only.
+- `/subagent-prune [days]` removes old run directories.
+- tmux cannot see whether a child is waiting for input; attach if it stalls.
+
+Details are in [SUBAGENT-SPEC.md](SUBAGENT-SPEC.md). Verify without model
+requests (the tmux tests use an isolated tmux server and a stub `pi`):
+
+```sh
+make -C extensions/tests test-subagents
+make -C extensions/tests test-euler
+```
+
 ## Verify bootstrap behavior
 
 ```sh

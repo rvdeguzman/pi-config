@@ -24,14 +24,19 @@ const testProfiles: Record<string, string> = {
 for (const [name, body] of Object.entries(testProfiles)) {
 	await writeFile(join(agentDir, "agents", `${name}.md`), `---\nname: ${name}\n${body}\n---\n`);
 }
-delete process.env.HERDR_WORKSPACE_ID;
+// These tests may themselves run inside a delegated child, Herdr, or tmux.
+for (const key of Object.keys(process.env)) {
+	if (/^(HERDR_|TMUX|PI_HERDR_SUBAGENT_)/.test(key)) delete process.env[key];
+}
+process.env.PI_SUBAGENT_BACKEND = "herdr";
 after(async () => {
 	await rm(agentDir, { recursive: true, force: true });
 });
 
-const { default: extensionImpl, herdrOk, isRunDetails, pruneRunDirs, resolveChildTools, resultText } = await import(
-	"../herdr-subagent.ts"
+const { default: extensionImpl, isRunDetails, pruneRunDirs, resolveChildTools, resultText } = await import(
+	"../subagent.ts"
 );
+const { herdrOk } = await import("../lib/subagent-backends.ts");
 const { createFakeHerdr } = await import("./fake-herdr.ts");
 type FakeHerdr = ReturnType<typeof createFakeHerdr>;
 
@@ -72,8 +77,8 @@ function harness(herdr: FakeHerdr, options: { sessionId?: string; cwd?: string; 
 		"find",
 		"ls",
 		"bash",
-		"herdr_subagent",
-		"herdr_async",
+		"subagent",
+		"subagent_async",
 	];
 	const pi = {
 		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
@@ -120,9 +125,8 @@ const validDetails = {
 	status: "failed",
 	task: "inspect",
 	cwd: "/tmp",
-	workspaceId: "w1",
-	tabId: "w1:t1",
-	paneId: "w1:p1",
+	backend: "herdr",
+	target: "herdr pane w1:p1, tab w1:t1",
 	agentName: "sub-test",
 	attachCommand: "herdr tab focus w1:t1",
 	captureCommand: "herdr pane read w1:p1",
@@ -147,7 +151,7 @@ test("run details validation rejects empty and malformed details", () => {
 test("renderer falls back to raw tool content for empty details", () => {
 	const { tools } = harness(createFakeHerdr());
 	const component = tools
-		.get("herdr_subagent")
+		.get("subagent")
 		.renderResult(
 			{ details: {}, content: [{ type: "text", text: "herdr agent start failed" }] },
 			{ expanded: false, isPartial: false },
@@ -185,8 +189,8 @@ test("the extensions tools token grants every active extension tool, but never d
 			fromExtension("deferred_tool", "deferred"),
 			{ name: "sdk_tool", exposure: "direct", sourceInfo: { path: "<sdk:sdk_tool>", source: "sdk" } },
 			{ name: "mcp_call", exposure: "direct", sourceInfo: { path: "builtin:mcp", source: "builtin" } },
-			fromExtension("herdr_async"),
-			fromExtension("herdr_subagent"),
+			fromExtension("subagent_async"),
+			fromExtension("subagent"),
 		],
 	} as any;
 	assert.deepEqual(resolveChildTools(pi, ["read", "extensions"], "scout"), [
@@ -204,7 +208,7 @@ test("the extensions tools token grants every active extension tool, but never d
 	assert.throws(() => resolveChildTools(pi, ["read", "nope"], "scout"), /unknown tool\(s\): nope/);
 });
 
-test("all explicit agent references route through async Herdr, including worker", async () => {
+test("all explicit agent references route through subagent_async, including worker", async () => {
 	let execCalled = false;
 	const { tools, handlers } = harness({
 		...createFakeHerdr(),
@@ -213,31 +217,33 @@ test("all explicit agent references route through async Herdr, including worker"
 			throw new Error("unexpected process launch");
 		},
 	} as any);
-	const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {});
-	assert.match(prompt.systemPrompt, /Route every valid &name through herdr_async, including &worker/);
-	assert.match(prompt.systemPrompt, /herdr_subagent only for a parent-selected blocking dependency/);
-	assert.doesNotMatch(prompt.systemPrompt, /herdr_worker|herdr_send|herdr_interrupt/);
+	const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
+	await handlers.get("before_agent_start")?.(event, {});
+	const guidance = event.systemPromptOptions.sections.agent_profiles!;
+	assert.match(guidance, /Route every valid &name through subagent_async, including &worker/);
+	assert.match(guidance, /subagent only for a parent-selected blocking dependency/);
+	assert.doesNotMatch(guidance, /herdr_/);
 
-	assert.match(tools.get("herdr_async").promptGuidelines.join("\n"), /every explicit &name.*including &worker/);
-	const subagent = tools.get("herdr_subagent");
+	assert.match(tools.get("subagent_async").promptGuidelines.join("\n"), /every explicit &name.*including &worker/);
+	const subagent = tools.get("subagent");
 	assert.match(subagent.description, /Available blocking profiles:/);
 	assert.doesNotMatch(subagent.description, /Available blocking profiles:[^.]*worker/);
-	assert.deepEqual([...tools.keys()].sort(), ["herdr_async", "herdr_subagent"]);
+	assert.deepEqual([...tools.keys()].sort(), ["subagent", "subagent_async"]);
 	await assert.rejects(
 		subagent.execute("blocking-worker", { agent: "WoRkEr", task: "implement it" }, undefined, undefined, {}),
-		/worker profile is not available.*Use herdr_async/s,
+		/worker profile is not available.*Use subagent_async/s,
 	);
 	assert.equal(execCalled, false);
 });
 
-test("herdr_async returns immediately and steers eventual completion or failure into the parent", async () => {
+test("subagent_async returns immediately and steers eventual completion or failure into the parent", async () => {
 	let nextResult: Record<string, unknown> = { output: "async answer", provider: "openai-codex", model: "gpt-test" };
 	const herdr = createFakeHerdr({
 		onPrompt: (launch, fake) => void setTimeout(() => void fake.complete(launch, nextResult), 80),
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr);
 	try {
-		const result = await tools.get("herdr_async").execute("async-1", { agent: "worker", task: "finish in the background" }, undefined, undefined, ctx);
+		const result = await tools.get("subagent_async").execute("async-1", { agent: "worker", task: "finish in the background" }, undefined, undefined, ctx);
 		assert.match(result.content[0].text, /delivered automatically; do not poll/i);
 		assert.match(result.content[0].text, /run [0-9a-f]{8}/);
 		assert.equal(result.details.status, "running");
@@ -249,20 +255,20 @@ test("herdr_async returns immediately and steers eventual completion or failure 
 		assert.equal(launch.env.PI_HERDR_SUBAGENT_EXIT_ON_FINISH, "1");
 		assert.match(launch.env.PI_HERDR_SUBAGENT_RESULT!, /result\.json$/);
 		const toolsArg = launch.argv![launch.argv!.indexOf("--tools") + 1]!;
-		assert.doesNotMatch(toolsArg, /herdr_/);
+		assert.deepEqual(toolsArg.split(",").filter((name) => name.startsWith("subagent")), []);
 		assert.equal(launch.prompt, "finish in the background");
 
 		await waitFor(() => messages.length === 1);
 		assert.deepEqual(herdr.closedTabs, ["w1:t1"]);
-		assert.equal(messages[0]!.message.customType, "herdr-async-result");
-		assert.match(messages[0]!.message.content, /Async Herdr subagent "worker" completed/);
+		assert.equal(messages[0]!.message.customType, "subagent-async-result");
+		assert.match(messages[0]!.message.content, /Async subagent "worker" completed/);
 		assert.match(messages[0]!.message.content, /async answer/);
 		assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
 
 		nextResult = { status: "failed", output: "partial async output", error: "child task failed", failureKind: "task" };
-		await tools.get("herdr_async").execute("async-2", { agent: "worker", task: "fail in the background" }, undefined, undefined, ctx);
+		await tools.get("subagent_async").execute("async-2", { agent: "worker", task: "fail in the background" }, undefined, undefined, ctx);
 		await waitFor(() => messages.length === 2);
-		assert.match(messages[1]!.message.content, /Async Herdr subagent "worker" failed/);
+		assert.match(messages[1]!.message.content, /Async subagent "worker" failed/);
 		assert.match(messages[1]!.message.content, /child task failed/);
 		assert.match(messages[1]!.message.content, /partial async output/);
 	} finally {
@@ -283,7 +289,7 @@ test("async runs fall back to the next model only on retryable provider failures
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr);
 	try {
-		await tools.get("herdr_async").execute("fallback", { agent: "fallback", task: "look" }, undefined, undefined, ctx);
+		await tools.get("subagent_async").execute("fallback", { agent: "fallback", task: "look" }, undefined, undefined, ctx);
 		await waitFor(() => messages.length === 1);
 		assert.equal(herdr.launches.length, 2);
 		assert.match(messages[0]!.message.content, /completed/);
@@ -298,13 +304,13 @@ test("a child that fails to start falls back to the next model", async () => {
 		startError: (launch) => (launch.argv!.includes("nope") ? 'Unknown provider "nope"' : undefined),
 	});
 	const { tools, ctx } = harness(herdr);
-	const result = await tools.get("herdr_subagent").execute("start", { agent: "nostart", task: "look" }, undefined, undefined, ctx);
+	const result = await tools.get("subagent").execute("start", { agent: "nostart", task: "look" }, undefined, undefined, ctx);
 	assert.match(result.content[0].text, /openai-codex\/second/);
 	assert.equal(herdr.launches.length, 2);
 	assert.ok(herdr.closedTabs.includes(herdr.launches[0]!.tabId));
 
 	await assert.rejects(
-		tools.get("herdr_subagent").execute("start2", { agent: "nostart-only", task: "look" }, undefined, undefined, ctx),
+		tools.get("subagent").execute("start2", { agent: "nostart-only", task: "look" }, undefined, undefined, ctx),
 		/Child Pi did not start/,
 	);
 });
@@ -317,7 +323,7 @@ test("a result arriving during exit grace wins over a vanished agent and auto-cl
 		},
 	});
 	const { tools, ctx } = harness(herdr);
-	const result = await tools.get("herdr_subagent").execute("call-1", { agent: "scout", task: "wait for a late result" }, undefined, undefined, ctx);
+	const result = await tools.get("subagent").execute("call-1", { agent: "scout", task: "wait for a late result" }, undefined, undefined, ctx);
 	assert.match(result.content[0].text, /late but valid/);
 	assert.match(result.content[0].text, /auto-closed/);
 	assert.equal(result.details.autoClosed, true);
@@ -332,7 +338,7 @@ test("a child that exits without a result fails the blocking call with pane cont
 	});
 	const { tools, ctx } = harness(herdr);
 	await assert.rejects(
-		tools.get("herdr_subagent").execute("dead", { agent: "scout", task: "die" }, undefined, undefined, ctx),
+		tools.get("subagent").execute("dead", { agent: "scout", task: "die" }, undefined, undefined, ctx),
 		/exited before reporting a result/,
 	);
 });
@@ -352,8 +358,8 @@ test("sibling subagent calls run concurrently and auto-close independently", asy
 	});
 	const { tools, ctx } = harness(herdr);
 	await Promise.all([
-		tools.get("herdr_subagent").execute("one", { agent: "scout", task: "first" }, undefined, undefined, ctx),
-		tools.get("herdr_subagent").execute("two", { agent: "scout", task: "second" }, undefined, undefined, ctx),
+		tools.get("subagent").execute("one", { agent: "scout", task: "first" }, undefined, undefined, ctx),
+		tools.get("subagent").execute("two", { agent: "scout", task: "second" }, undefined, undefined, ctx),
 	]);
 	assert.equal(maximum, 2);
 	assert.deepEqual(herdr.closedTabs.sort(), ["w1:t1", "w2:t1"]);
@@ -368,7 +374,7 @@ test("async runs survive /reload: the next extension instance re-attaches and de
 	});
 	const sessionId = `reload-${Date.now()}`;
 	const first = harness(herdr, { sessionId });
-	await first.tools.get("herdr_async").execute("reload", { agent: "scout", task: "keep going" }, undefined, undefined, first.ctx);
+	await first.tools.get("subagent_async").execute("reload", { agent: "scout", task: "keep going" }, undefined, undefined, first.ctx);
 	await first.handlers.get("session_shutdown")?.({ reason: "reload" }, first.ctx);
 	assert.deepEqual(herdr.closedTabs, [], "reload must not close async children");
 
@@ -382,10 +388,25 @@ test("async runs survive /reload: the next extension instance re-attaches and de
 	await second.handlers.get("session_shutdown")?.({ reason: "quit" }, second.ctx);
 });
 
+test("reattachment does not close a reused Herdr pane hosting another agent", async () => {
+	const herdr = createFakeHerdr({ onPrompt: () => undefined });
+	const sessionId = `reuse-${Date.now()}`;
+	const first = harness(herdr, { sessionId });
+	await first.tools.get("subagent_async").execute("reuse", { agent: "scout", task: "keep going" }, undefined, undefined, first.ctx);
+	await first.handlers.get("session_shutdown")?.({ reason: "reload" }, first.ctx);
+	herdr.launches[0]!.name = "someone-else";
+
+	const second = harness(herdr, { sessionId });
+	await second.handlers.get("session_start")?.({ reason: "reload" }, second.ctx);
+	await waitFor(() => second.messages.length === 1);
+	assert.deepEqual(herdr.closedTabs, []);
+	await second.handlers.get("session_shutdown")?.({ reason: "quit" }, second.ctx);
+});
+
 test("quitting cancels async children and closes their tabs", async () => {
 	const herdr = createFakeHerdr({ onPrompt: () => undefined });
 	const { tools, messages, ctx, handlers } = harness(herdr);
-	await tools.get("herdr_async").execute("quit", { agent: "scout", task: "never finishes" }, undefined, undefined, ctx);
+	await tools.get("subagent_async").execute("quit", { agent: "scout", task: "never finishes" }, undefined, undefined, ctx);
 	await handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
 	assert.deepEqual(herdr.closedTabs, ["w1:t1"]);
 	await new Promise((resolve) => setTimeout(resolve, 100));
@@ -418,7 +439,7 @@ test("worktree profiles run on their own branch; clean checkouts are removed and
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr, { cwd: repo });
 	try {
-		const dispatched = await tools.get("herdr_async").execute("wt", { agent: "isolated", task: "add a feature" }, undefined, undefined, ctx);
+		const dispatched = await tools.get("subagent_async").execute("wt", { agent: "isolated", task: "add a feature" }, undefined, undefined, ctx);
 		const created = herdr.worktrees[0]!;
 		assert.match(created.branch, /^pi\/isolated-[0-9a-f]{8}$/);
 		assert.match(dispatched.content[0].text, new RegExp(created.branch));
@@ -456,7 +477,7 @@ test("dirty worktrees are retained with their tab; no-commit clean worktrees dro
 	});
 	const { tools, messages, ctx, handlers } = harness(herdr, { cwd: repo });
 	try {
-		await tools.get("herdr_async").execute("dirty", { agent: "isolated", task: "leave mess" }, undefined, undefined, ctx);
+		await tools.get("subagent_async").execute("dirty", { agent: "isolated", task: "leave mess" }, undefined, undefined, ctx);
 		await waitFor(() => messages.length === 1);
 		const dirty = herdr.worktrees[0]!;
 		assert.match(messages[0]!.message.content, /Uncommitted changes; checkout and tab retained/);
@@ -465,7 +486,7 @@ test("dirty worktrees are retained with their tab; no-commit clean worktrees dro
 		assert.equal(herdr.closedTabs.includes(`${dirty.workspaceId}:t2`), false);
 
 		mode = "noop";
-		await tools.get("herdr_async").execute("noop", { agent: "isolated", task: "do nothing" }, undefined, undefined, ctx);
+		await tools.get("subagent_async").execute("noop", { agent: "isolated", task: "do nothing" }, undefined, undefined, ctx);
 		await waitFor(() => messages.length === 2);
 		const noop = herdr.worktrees[1]!;
 		assert.match(messages[1]!.message.content, /No commits; checkout and branch removed/);
@@ -483,7 +504,7 @@ test("worktree requests outside a Git repository run in place with a note", asyn
 	const herdr = createFakeHerdr();
 	const { tools, ctx } = harness(herdr, { cwd: plain });
 	try {
-		const result = await tools.get("herdr_subagent").execute("plain", { agent: "scout-worktree", task: "look" }, undefined, undefined, ctx);
+		const result = await tools.get("subagent").execute("plain", { agent: "scout-worktree", task: "look" }, undefined, undefined, ctx);
 		assert.equal(herdr.worktrees.length, 0);
 		assert.match(result.content[0].text, /not a Git repository; ran in place/);
 	} finally {
@@ -578,5 +599,34 @@ test("a shutdown retry preserves an already-settled successful result", async ()
 			else process.env[key] = value;
 		}
 		await rm(sandbox, { recursive: true, force: true });
+	}
+});
+
+test("auto uses Herdr only inside a Herdr pane, then tmux; explicit backends fail closed", async () => {
+	const { configuredBackend, resolveBackend } = await import("../lib/subagent-backends.ts");
+	const stub = (name: string, available: boolean) => ({
+		name,
+		preflight: async () => {
+			if (!available) throw new Error(`${name} missing.`);
+		},
+	});
+	const choose = (setting: any, env: Record<string, string>, herdr: boolean, tmux: boolean) =>
+		resolveBackend({ herdr: stub("herdr", herdr), tmux: stub("tmux", tmux) } as any, setting, env).then((b) => b.name);
+	const inHerdr = { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" };
+
+	assert.equal(await choose("auto", inHerdr, true, true), "herdr");
+	assert.equal(await choose("auto", {}, true, true), "tmux", "a reachable Herdr CLI alone does not select Herdr");
+	assert.equal(await choose("auto", inHerdr, false, true), "tmux");
+	await assert.rejects(choose("auto", {}, true, false), /No subagent backend is available.*Install tmux or run Pi inside Herdr/);
+	await assert.rejects(choose("herdr", {}, false, true), /backend herdr is unavailable/, "no silent fallback to tmux");
+	await assert.rejects(choose("tmux", inHerdr, true, false), /backend tmux is unavailable/);
+
+	await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ backend: "tmux" }));
+	try {
+		assert.deepEqual(await configuredBackend({}), { setting: "tmux", source: "file" });
+		assert.deepEqual(await configuredBackend({ PI_SUBAGENT_BACKEND: "herdr" }), { setting: "herdr", source: "env" });
+		await assert.rejects(configuredBackend({ PI_SUBAGENT_BACKEND: "screen" }), /Invalid subagent backend/);
+	} finally {
+		await rm(join(agentDir, "subagents.json"));
 	}
 });

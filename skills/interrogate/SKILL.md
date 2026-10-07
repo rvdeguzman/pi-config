@@ -33,7 +33,7 @@ Create a run directory: `RUN=$(mktemp -d "${TMPDIR:-/tmp}/interrogate.XXXXXX")`.
 
 ## Step 4: Run reviewers
 
-Call `herdr_subagent` twice **in the same tool-call block** so both run concurrently: once with agent `reviewer-claude`, once with agent `reviewer-gpt`. Use the same task for both, with the absolute path substituted:
+Call `subagent` twice **in the same tool-call block** so both run concurrently: once with agent `reviewer-claude`, once with agent `reviewer-gpt`. Use the same task for both, with the absolute path substituted:
 
 > You are a read-only reviewer. Do not edit files, commit, or run mutating commands. Read `<RUN>/prompt.md` and follow it exactly. Return only the Findings section it specifies.
 

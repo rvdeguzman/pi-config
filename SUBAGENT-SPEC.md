@@ -1,22 +1,23 @@
-# Herdr Subagents with Agent Profiles
+# Subagents with Agent Profiles
 
 ## Status
 
-Approved design specification, revision 3: Herdr-native launch, worktree isolation, reload survival, and run-directory retention. Revision 3 removed the fire-and-forget `herdr_worker`, `herdr_send` follow-ups, and `herdr_interrupt`. This replaces the previous asynchronous RPC/fleet design.
+Approved design specification, revision 4: portable launch backends (Herdr or tmux) behind one runner, backend-neutral tool names, worktree isolation, reload survival, and run-directory retention. Revision 4 renamed `herdr_subagent`/`herdr_async` to `subagent`/`subagent_async` (no aliases) and added the tmux backend; see [EULER-SPEC.md](EULER-SPEC.md). Revision 3 removed the fire-and-forget `herdr_worker`, `herdr_send` follow-ups, and `herdr_interrupt`.
 
 ## Goal
 
-Keep the observable Herdr-backed subagent runner, with child runtime configuration in small named agent profiles, and provide both blocking and asynchronous execution paths.
+Keep an observable subagent runner, hosted in a Herdr tab or a tmux window, with child runtime configuration in small named agent profiles, and provide both blocking and asynchronous execution paths.
 
 The responsibility split is:
 
-- The caller/parent chooses the agent profile for a blocking `herdr_subagent` or asynchronous `herdr_async` call.
+- The caller/parent chooses the agent profile for a blocking `subagent` or asynchronous `subagent_async` call.
 - The caller/parent writes the complete delegated task.
 - The agent profile selects the model, thinking level, and tools.
 - The caller/parent decides how many children to launch and whether those calls are parallel or sequential.
-- `herdr_subagent` waits for a result.
-- `herdr_async` returns launch coordinates immediately, monitors in the background, and steers the final result back automatically.
-- Profiles marked `worktree: true` run each child on its own Git branch in a Herdr-managed worktree.
+- `subagent` waits for a result.
+- `subagent_async` returns launch coordinates immediately, monitors in the background, and steers the final result back automatically.
+- Profiles marked `worktree: true` run each child on its own Git branch in an isolated worktree (Herdr-managed under Herdr, a plain Git worktree under tmux).
+- The launch backend is chosen per run (`auto` by default), never by profiles.
 
 There is no workflow engine and no profile-level concurrency policy.
 
@@ -83,7 +84,8 @@ Rules:
 - A string selects that model.
 - An array tries candidates in order.
 - A missing model inherits the caller's active model.
-- Fallback occurs only for retryable provider failures such as rate limiting, temporary unavailability, authentication/provider startup failure, or a model being unavailable. A child Pi that exits before Herdr sees it ready counts as a startup failure.
+- Fallback occurs only for retryable provider failures such as rate limiting, temporary unavailability, authentication/provider startup failure, or a model being unavailable. A child Pi that exits before it is ready (Herdr) or before it submits its task (tmux) counts as a startup failure.
+- Every fallback attempt uses the run's persisted backend.
 - Fallback applies to blocking and async runs.
 - Task errors, tool failures, invalid configuration, explicit aborts, and user cancellation do not advance to another model.
 - `thinking` applies to every candidate and is clamped by the selected model's capabilities.
@@ -94,7 +96,7 @@ Rules:
 - `tools` is the child's complete active-tool allowlist.
 - The reserved entry `extensions` expands to every extension-registered tool the caller has loaded with `direct` or `model-only` exposure (Pi built-in and SDK tools are excluded), e.g. `tools: [read, grep, find, ls, extensions]`. A real tool named `extensions` takes precedence over the token.
 - A missing `tools` value inherits the caller's active tools, excluding the delegation tools to prevent recursive delegation.
-- Both delegation tools (`herdr_subagent`, `herdr_async`) are removed from every child tool allowlist, even if a profile names them explicitly.
+- Both delegation tools (`subagent`, `subagent_async`) are removed from every child tool allowlist, even if a profile names them explicitly.
 - Unknown tool names are configuration errors and must be reported before launching the child.
 - Tool restrictions are capability reduction inside Pi, not an operating-system sandbox.
 
@@ -105,7 +107,7 @@ Read-only profiles should not include `bash`: a prompt cannot prevent a shell to
 The blocking model-facing tool remains one-child-per-call:
 
 ```ts
-herdr_subagent({
+subagent({
   agent: string;
   task: string;
   cwd?: string;
@@ -115,21 +117,21 @@ herdr_subagent({
 The asynchronous tool has the same profile/task shape, returns immediately, and later delivers a custom steer message with the bounded result:
 
 ```ts
-herdr_async({
+subagent_async({
   agent: string;
   task: string;
   cwd?: string;
 })
 ```
 
-Async runs are session-scoped: quitting or switching sessions cancels them and closes their tabs. A `/reload` does not: children keep running, run records stay on disk, and the reloaded extension re-attaches and delivers each pending result exactly once. Async runs use ordered model fallback like blocking runs.
+Async runs are session-scoped: quitting or switching sessions cancels them and closes their targets. A `/reload` does not: launched children keep running, run records stay on disk, and the reloaded extension re-attaches through each run's own backend. Delivery is at most once: `delivered` is persisted before the steer, so a crash between the two drops a result rather than repeating it. An async run still starting at `/reload` is cancelled and closed. Async runs use ordered model fallback like blocking runs.
 
 None of the tools accepts model, thinking, tools, parallel count, chain, or workflow parameters. Those concerns belong to the selected profile or the caller. The `worker` profile is async-only.
 
 Example:
 
 ```ts
-herdr_subagent({
+subagent({
   agent: "scout",
   task: "Map the authentication initialization flow. Cite exact files and explain unresolved gaps.",
 })
@@ -139,7 +141,7 @@ The extension exposes the available profile names in the tool description so the
 
 ## Concurrency
 
-The caller controls concurrency by issuing the desired number of ordinary `herdr_subagent` or `herdr_async` calls.
+The caller controls concurrency by issuing the desired number of ordinary `subagent` or `subagent_async` calls.
 
 - Sibling calls emitted by the parent may execute concurrently through Pi's normal parallel tool execution.
 - Sequential blocking subagent calls remain sequential when the parent waits for one result before issuing the next.
@@ -148,7 +150,7 @@ The caller controls concurrency by issuing the desired number of ordinary `herdr
 - The current extension-wide serial queue must be removed.
 - The implementation may retain a fixed defensive process ceiling only as a safety guard; it must not choose how many agents the caller should spawn.
 
-Each reported call has independent cancellation, result data, Herdr identifiers, and lifecycle state. Session shutdown closes unfinished blocking and async children owned by that parent session.
+Each reported call has independent cancellation, result data, backend target, and lifecycle state. Session shutdown closes unfinished blocking and async children owned by that parent session.
 
 ## `&agent` references and autocomplete
 
@@ -160,9 +162,9 @@ Humans can explicitly reference a profile in the editor:
 &worker implement the approved change and run the focused tests
 ```
 
-An `&name` reference is an instruction to the parent to use that agent profile asynchronously through `herdr_async`. This includes `&worker`. It does not bypass the parent or launch a child directly: the parent still writes the complete task, adding relevant context and constraints from the conversation.
+An `&name` reference is an instruction to the parent to use that agent profile asynchronously through `subagent_async`. This includes `&worker`. It does not bypass the parent or launch a child directly: the parent still writes the complete task, adding relevant context and constraints from the conversation.
 
-Every reference requests a fresh async child invocation. It does not address or steer an already-running child. `herdr_subagent` remains available for parent-selected blocking dependencies.
+Every reference requests a fresh async child invocation. It does not address or steer an already-running child. `subagent` remains available for parent-selected blocking dependencies.
 
 ### Autocomplete behavior
 
@@ -171,7 +173,7 @@ Install an autocomplete provider through `ctx.ui.addAutocompleteProvider()`:
 - Trigger on `&` only; do not interfere with Pi's `@` file completion.
 - Match a token at the start of input or after whitespace.
 - Match profile names by case-insensitive prefix.
-- Read suggestions from the same profile registry used by both Herdr delegation tools.
+- Read suggestions from the same profile registry used by both delegation tools.
 - Display labels as `&<name>`.
 - Insert the literal `&<name>` followed by one space.
 - Delegate to the previously installed autocomplete provider whenever the cursor is not in an agent-reference token or no profile matches.
@@ -188,53 +190,68 @@ Unknown `&name` text is left unchanged. The extension does not silently substitu
 
 ### Parent prompt guidance
 
-When profiles are available, add concise guidance to the parent system prompt:
+When profiles are available, add concise guidance to the parent system prompt as its own structured section (`agent_profiles`), not a full prompt replacement:
 
 - Treat a valid `&name` reference as the user's explicit request to delegate asynchronously through that profile.
-- Route every valid reference through `herdr_async`, including `&worker`.
+- Route every valid reference through `subagent_async`, including `&worker`.
 - Compose a complete, self-contained task for each child rather than forwarding an underspecified fragment blindly.
-- Use `herdr_subagent` only for a parent-selected blocking dependency.
+- Use `subagent` only for a parent-selected blocking dependency.
 - Do not add model, thinking, or tool overrides; the profile owns those settings.
 - The number and ordering of child calls remain the parent's decision unless the user explicitly requests particular references or parallelism.
 
-## Herdr execution
+## Execution backends
+
+`/subagent-backend [auto|herdr|tmux]` reports or persists the setting in ignored `~/.pi/agent/subagents.json`; `PI_SUBAGENT_BACKEND` overrides it per process. `auto` (default) resolves once per run: Herdr when the parent runs in a Herdr pane (`HERDR_ENV=1`, `HERDR_PANE_ID`) and the CLI answers, else tmux when installed, else an actionable error before any side effect. Explicit choices fail closed. Each run record stores `backend` plus an opaque `handle`; probes, fallback attempts, reattachment, and cleanup use them, so a setting change only affects new runs. Records without `backend` are Herdr records.
+
+The backend interface is deliberately small (`extensions/lib/subagent-backends.ts`): `preflight`, `launch(request, onCreated)`, `probe`, `tail`, `close`, `commands`, and an optional `createCheckout`. `onCreated` fires as soon as the target exists so the runner persists the handle before startup finishes.
+
+### Herdr
 
 Requires Herdr 0.9+ (`agent start`, `agent prompt --wait --until`, `pane process-info`, `worktree create`).
 
-### Launch protocol
-
-1. `herdr tab create --no-focus --env …` creates a background tab whose shell carries the child-mode environment (result path and exit-on-finish). Outside Herdr, `workspace create` is used instead.
+1. `herdr tab create --no-focus --env …` creates a background tab whose shell carries the child-mode environment (result path and exit-on-finish). Outside a Herdr pane, `workspace create` is used instead.
 2. `herdr agent start <name> --kind pi --pane <pane> -- <pi args>` launches Pi. Herdr returns only once it recognizes a ready Pi agent, so there is no type-into-shell race. While it waits, the parent polls `pane process-info`; if the shell regains the foreground, Pi exited during startup and the attempt fails within seconds instead of at Herdr's 45 s timeout.
 3. `herdr agent prompt <pane> <task> --wait --until working --until blocked` submits the task and confirms the turn started.
 
-### Completion
+`agent get` reports liveness and blocked state; probes treat a pane now hosting a differently named agent as gone.
 
-The child writes an atomic result file on `agent_settled`; that file is the only completion truth. The parent watches the run directory with `fs.watch` (plus a 1 s fallback stat) and probes Herdr (`agent get`) every 2 s for blocked state and liveness. An agent that disappears without a result fails after a short grace period, with the pane tail as context. Blocking calls also read the pane every 2 s for their live preview; async monitors do not.
+### tmux
 
-### Worktree isolation
+- Inside tmux, children open as background windows in the parent's session; otherwise in a detached `pi-subagents` session, created on demand and found again by a session tag (hooks may rename it).
+- The window runs Pi from argv through a constant `sh` wrapper that unsets every inherited `HERDR_*` variable, so Herdr integrations stay inactive. No task text passes through a shell or argv.
+- The child reads the task from the private `task.md` (`PI_HERDR_SUBAGENT_TASK`), submits it, and writes `result.json.started`; launch waits for that marker, and a pane that dies first is a startup failure.
+- Windows are tagged with the run id and keep dead panes (`remain-on-exit`) for diagnostics; probes and closes act only on a window carrying this run's tag.
+- Reported commands name the exact socket and window, e.g. `tmux -S <socket> attach-session -t @7 \; select-window -t @7`, `capture-pane -p -t %9 -S -200`, `kill-window -t @7`.
+- tmux cannot see Pi's blocked state; status shows as running and the result says so. The result file and pane liveness decide completion.
+
+## Completion
+
+The child writes an atomic result file on `agent_settled`; that file is the only completion truth. The parent watches the run directory with `fs.watch` (plus a 1 s fallback stat) and probes the backend every 2 s for liveness (and Herdr's blocked state). A child that disappears without a result fails after a short grace period, with the pane tail as context. Blocking calls also read the pane every 2 s for their live preview; async monitors do not.
+
+## Worktree isolation
 
 When the profile sets `worktree: true` and the working directory is inside a Git repository with at least one commit:
 
-1. `herdr worktree create` creates branch `pi/<profile>-<run8>` from the source repository's committed `HEAD` and opens it as a workspace. The child tab is created there and the workspace's root tab is closed. The child's cwd keeps the caller's relative subdirectory.
+1. A checkout on branch `pi/<profile>-<run8>` is created from the source repository's committed `HEAD`. Herdr: `herdr worktree create` opens it as a workspace; the child tab is created there and the workspace's root tab is closed once the child tab exists. tmux: `git worktree add` under `~/.pi/agent/subagent-worktrees/` (never pruned automatically). The child's cwd keeps the caller's relative subdirectory.
 2. A short note is appended to the task: the checkout path, branch, and base commit; that uncommitted parent changes are absent; and that the child must commit on the branch and must not merge, rebase, push, or switch branches.
 3. After the run, the parent inspects the checkout (commits since base, diffstat, uncommitted changes):
-   - Uncommitted changes: the checkout and its tab are retained and reported.
-   - Clean with commits: the tab closes, the checkout is removed with `git worktree remove` (never forced), and the branch is kept and reported with an integration hint.
+   - Uncommitted changes: the checkout and its target are retained and reported.
+   - Clean with commits: the target closes, the checkout is removed with `git worktree remove` (never forced), and the branch is kept and reported with an integration hint.
    - Clean without commits: the checkout and branch are removed.
 4. A launch failure or abort applies the same release rules. The extension never commits, merges, or deletes a branch that has commits. Integration is the parent's job.
 
 Outside a Git repository, the run proceeds in place and the result says so. Parallel isolated runs are allowed because each one gets a unique branch.
 
-### Per tool
+## Per tool
 
-- `herdr_subagent`: launch, monitor, settle, and return the bounded result. Progress updates include the attach and capture commands. Retryable failures move to the next model candidate in a fresh tab.
-- `herdr_async`: return the run id and Herdr coordinates once the first child is running. A session-scoped monitor tracks it in the parent widget, auto-closes the tab, and injects a visible `herdr-async-result` custom message with `deliverAs: "steer"` and `triggerTurn: true`.
+- `subagent`: launch, monitor, settle, and return the bounded result. Progress updates include the attach and capture commands. Retryable failures move to the next model candidate in a fresh target on the same backend.
+- `subagent_async`: return the run id and attach/capture commands once the first child is running. A session-scoped monitor tracks it in the parent widget, auto-closes the target, and injects a visible `subagent-async-result` custom message with `deliverAs: "steer"` and `triggerTurn: true`.
 
-### Run records and retention
+## Run records and retention
 
-Each run writes `run.json` next to its `task.md`, session directory, and result file under `~/.pi/agent/herdr-subagents/<parent session>/<run>/`. Records drive re-attachment after `/reload` or a crash. On startup, run directories older than `PI_HERDR_SUBAGENT_RETENTION_DAYS` (default 14; `0` disables) are pruned in the background, except the current session's. `/herdr-prune [days]` prunes on demand.
+Each run writes `run.json` next to its `task.md`, session directory, and result file under `~/.pi/agent/herdr-subagents/<parent session>/<run>/` (directory name kept for existing records). The record is saved as soon as the run owns a worktree or a launch target, before startup completes. Records drive re-attachment after `/reload` or a crash; a record left `queued` with a handle (or a blocking record left `running`) means its owner died mid-flight, and the next session start closes that target (only if it can still prove ownership) and releases its worktree. On startup, run directories older than `PI_HERDR_SUBAGENT_RETENTION_DAYS` (default 14; `0` disables) are pruned in the background, except the current session's. `/subagent-prune [days]` prunes on demand.
 
-Blocking children remain visible and attachable while running, then shut down and auto-close after the parent collects their result. Set `PI_HERDR_SUBAGENT_EXIT_ON_FINISH=0` on the parent to retain completed blocking tabs for inspection. A blocking subagent fallback attempt belongs to the same logical tool call and must not produce multiple successful results.
+Blocking children remain visible and attachable while running, then shut down and auto-close after the parent collects their result. Set `PI_HERDR_SUBAGENT_EXIT_ON_FINISH=0` on the parent to retain completed blocking targets for inspection. A blocking subagent fallback attempt belongs to the same logical tool call and must not produce multiple successful results.
 
 ## Trust and isolation
 
@@ -245,16 +262,18 @@ Blocking children remain visible and attachable while running, then shut down an
 - Both delegation tool names are excluded from all child `--tools` allowlists.
 - Profile file contents are configuration; Markdown bodies are ignored.
 - Shell commands must continue to use argument-safe construction and private run files.
+- tmux children never inherit `HERDR_*` variables.
 - Returned output remains capped at Pi's standard 50 KB / 2,000-line tool limit; the complete child session stays on disk.
 
 ## Expected files
 
 ```text
-extensions/herdr-subagent.ts        Herdr runner and tool registration
-extensions/subagent-profiles.ts     profile discovery, parsing, and validation
-extensions/agent-ref-autocomplete.ts  & reference completion
-extensions/tests/                    profile, fallback, concurrency, and autocomplete tests
-agents/*.md                          user-authored profile files
+extensions/subagent.ts                   runner, child mode, and tool registration
+extensions/lib/subagent-backends.ts      Herdr and tmux backends, backend selection
+extensions/lib/subagent-profiles.ts      profile discovery, parsing, and validation
+extensions/lib/agent-ref-autocomplete.ts & reference completion
+extensions/tests/                        runner (fake Herdr), real-tmux, profile, and autocomplete tests
+agents/*.md                              user-authored profile files
 ```
 
 The exact module split may change, but profile parsing and autocomplete must share one registry implementation.
@@ -268,10 +287,12 @@ Add focused tests for:
 - No fallback on task/tool failure or abort.
 - Inherited model and thinking behavior.
 - Tool allowlist validation and removal of both delegation tools.
-- Immediate `herdr_async` dispatch followed by one automatic steer delivery when its result appears.
+- Immediate `subagent_async` dispatch followed by one automatic steer delivery when its result appears.
 - Async failure delivery, tab cleanup, tool stripping, and parent-shutdown cancellation.
 - Async model fallback, and fast startup-failure fallback.
-- `/reload` detaching and re-attaching async runs with exactly-once delivery.
+- `/reload` detaching and re-attaching async runs with a single delivery, on Herdr and tmux.
+- Auto, explicit, and unavailable backend selection; a backend change after launch leaving existing runs on their backend.
+- tmux argv/task-file delivery, `HERDR_*` scrubbing, closing only the run's own window, and worktree release rules.
 - Worktree creation and branch reporting; retention of dirty checkouts; removal of no-commit branches; in-place fallback outside Git.
 - Age-based pruning of run directories.
 - Unknown and malformed profiles.
@@ -291,8 +312,8 @@ Add focused tests for:
 - Isolated profiles never write to the parent checkout, and their commits are reported as a branch for the parent to integrate.
 - Async runs survive `/reload`.
 - The parent can launch as many sibling calls as it chooses without an extension-wide serial queue.
-- Each child remains visible and inspectable in Herdr while running; completed blocking and async tabs auto-close.
-- Async completion and failure are delivered exactly once as steer messages without polling by the model.
+- Each child remains visible and inspectable in Herdr or tmux while running; completed blocking and async targets auto-close.
+- Async completion and failure are delivered at most once (never duplicated) as steer messages without polling by the model.
 - Typing `&` offers current profile names and inserts a literal `&name ` reference.
-- A valid reference routes through `herdr_async`, including `&worker`, while leaving task composition to the parent.
+- A valid reference routes through `subagent_async`, including `&worker`, while leaving task composition to the parent.
 - No workflow, chain, automatic role prompt, profile concurrency, or nested-subagent system is introduced.

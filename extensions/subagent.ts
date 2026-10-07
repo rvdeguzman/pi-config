@@ -1,28 +1,25 @@
 /**
- * herdr-subagent: run blocking or asynchronous delegated tasks in child Pi
- * processes living in real Herdr panes.
+ * subagent: run blocking or asynchronous delegated tasks in child Pi processes
+ * that stay visible in a Herdr tab or tmux window.
  *
- * Launch protocol (Herdr >= 0.9):
- *
- *   tab create --env K=V --no-focus     a background tab whose shell carries the
- *                                       child-mode environment
- *   agent start <name> --kind pi -- …   Herdr launches Pi and returns only once it
- *                                       recognizes an interactive, ready agent
- *   agent prompt <pane> <task>          ordered paste + Enter; waits until Herdr
- *                                       observes the turn start
- *
- * Profiles with `worktree: true` first create a Herdr-managed Git worktree
- * workspace on a fresh branch and run the child there.
+ * One backend-neutral runner owns profiles, tool allowlists, model fallback,
+ * task and result files, monitoring, async delivery, run records, pruning, and
+ * worktree release. A small backend (./lib/subagent-backends.ts) creates,
+ * probes, reads, and closes the launch target. Each run resolves its backend
+ * once (`/subagent-backend`, PI_SUBAGENT_BACKEND, default auto) and persists
+ * it with an opaque handle; fallback attempts, reattachment, and cleanup reuse
+ * that persisted backend.
  *
  * Since Pi renders on the alternate screen, pane reads cannot recover scrolled
  * off output. Reported children therefore load this same file in "child mode"
  * and write their final answer to an atomic result file. The parent watches that
- * file (fs.watch plus a slow fallback stat) and probes Herdr only every couple
- * of seconds for blocked state and liveness. The result file, not pane text, is
- * the source of truth.
+ * file (fs.watch plus a slow fallback stat) and probes the backend only every
+ * couple of seconds for liveness (and, on Herdr, blocked state). The result
+ * file, not pane text, is the source of truth.
  *
- * Every run persists a run.json record. Async runs survive /reload (monitors
- * re-attach on session_start), and old run directories are pruned automatically.
+ * Every run persists a run.json record as soon as it owns a worktree or a
+ * launch target. Async runs survive /reload (monitors re-attach on
+ * session_start), and old run directories are pruned automatically.
  */
 
 import { randomUUID } from "node:crypto";
@@ -45,13 +42,31 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { createAgentRefAutocomplete } from "./lib/agent-ref-autocomplete.ts";
+import {
+	BACKEND_ENV,
+	ChildStartupError,
+	commandsFor,
+	configuredBackend,
+	HerdrBackend,
+	resolveBackend,
+	settingsPath,
+	shellQuote,
+	TASK_ENV,
+	TmuxBackend,
+	trimPane,
+	type AgentStatus,
+	type BackendHandle,
+	type BackendName,
+	type BackendSetting,
+	type SubagentBackend,
+} from "./lib/subagent-backends.ts";
 import { subagentProfiles, type AgentProfile } from "./lib/subagent-profiles.ts";
 
 const CHILD_ENV = "PI_HERDR_SUBAGENT_CHILD";
 const RESULT_ENV = "PI_HERDR_SUBAGENT_RESULT";
 /**
- * Set to 0 to retain completed blocking subagent tabs for inspection.
- * Blocking subagents otherwise shut down and their Herdr tabs auto-close as
+ * Set to 0 to retain completed blocking subagent targets for inspection.
+ * Blocking subagents otherwise shut down and their tab/window auto-closes as
  * soon as the parent has collected the result.
  */
 const EXIT_ON_FINISH_ENV = "PI_HERDR_SUBAGENT_EXIT_ON_FINISH";
@@ -59,19 +74,21 @@ const EXIT_ON_FINISH_ENV = "PI_HERDR_SUBAGENT_EXIT_ON_FINISH";
 const RETENTION_ENV = "PI_HERDR_SUBAGENT_RETENTION_DAYS";
 const DEFAULT_RETENTION_DAYS = 14;
 const RUNS_DIR = "herdr-subagents";
+/** Plain Git worktrees for backends without managed checkouts (tmux). Never pruned automatically. */
+const WORKTREES_DIR = "subagent-worktrees";
 const WORKER_PROFILE = "worker";
-const ASYNC_RESULT_TYPE = "herdr-async-result";
-const ASYNC_WIDGET_ID = "herdr-async";
-const DELEGATION_TOOL_NAMES = new Set(["herdr_subagent", "herdr_async"]);
+const BLOCKING_TOOL = "subagent";
+const ASYNC_TOOL = "subagent_async";
+const ASYNC_RESULT_TYPE = "subagent-async-result";
+const ASYNC_WIDGET_ID = "subagent-async";
+const DELEGATION_TOOL_NAMES = new Set([BLOCKING_TOOL, ASYNC_TOOL]);
 /** Fallback result-file check; fs.watch normally wakes the monitor first. */
 const RESULT_CHECK_MS = 1_000;
-/** Herdr liveness / blocked-state probe interval. */
+/** Backend liveness / blocked-state probe interval. */
 const PROBE_INTERVAL_MS = 2_000;
-const START_TIMEOUT_MS = 45_000;
-const PROMPT_TIMEOUT_MS = 20_000;
-const PANE_PREVIEW_LINES = 18;
+/** Interactive Pi subscribes its renderer after session_start handlers; submit the task file after that. */
+const TASK_SUBMIT_DELAY_MS = 250;
 const PANE_READ_LINES = 60;
-const CAPTURE_LINES = 200;
 const EXIT_GRACE_MS = 1_500;
 const EXTENSION_PATH = fileURLToPath(import.meta.url);
 
@@ -83,7 +100,6 @@ const DelegatedTaskParams = Type.Object({
 
 type RunKind = "blocking" | "async";
 type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
-type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
 interface ChildResult {
 	version: 1;
@@ -105,6 +121,7 @@ export interface WorktreeInfo {
 	path: string;
 	branch: string;
 	base: string;
+	/** Herdr-managed worktree workspace. */
 	workspaceId?: string;
 	/** Checkout state after the run: removed (branch kept), retained, or still in use. */
 	state?: "active" | "removed" | "retained";
@@ -118,9 +135,9 @@ interface RunDetails {
 	status: RunStatus;
 	task: string;
 	cwd: string;
-	workspaceId: string;
-	tabId: string;
-	paneId: string;
+	backend: BackendName;
+	/** Human-readable launch target, e.g. "herdr pane w1:p1, tab w1:t1". */
+	target: string;
 	agentName: string;
 	attachCommand: string;
 	captureCommand: string;
@@ -157,13 +174,20 @@ export interface RunRecord {
 	thinking: string;
 	tools: string[];
 	agentName: string;
-	workspaceId: string;
-	tabId: string;
-	paneId: string;
+	/** Launch host, fixed for the run's lifetime. Legacy records without it are Herdr records. */
+	backend?: BackendName;
+	/** The current attempt's target; only `backend` interprets it. */
+	handle?: BackendHandle;
+	/** Legacy Herdr coordinates (pre-backend records). */
+	workspaceId?: string;
+	tabId?: string;
+	paneId?: string;
 	resultPath?: string;
 	sessionFile?: string;
 	worktree?: WorktreeInfo;
+	/** "queued" with a handle means launch was interrupted; the next session start cleans it up. */
 	status: RunStatus;
+	/** Saved before the async result is steered: delivery is at most once. */
 	delivered?: boolean;
 	startedAt: number;
 	finishedAt?: number;
@@ -173,124 +197,34 @@ interface LiveRun {
 	record: RunRecord;
 	details: RunDetails;
 	controller: AbortController;
+	/** The first attempt is running with its task submitted. */
+	launched: boolean;
+	/** Superseded targets (worktree placeholder, failed attempts) closed once a replacement exists. */
+	pending: BackendHandle[];
 	/** Set when monitoring stops for /reload; the child keeps running. */
 	detached?: boolean;
-}
-
-function shellQuote(value: string): string {
-	if (value.length === 0) return "''";
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function shortId(id: string): string {
 	return id.replace(/-/g, "").slice(0, 8);
 }
 
-/* -------------------------------------------------------------------------- */
-/* herdr CLI                                                                   */
-/* -------------------------------------------------------------------------- */
+function backendNameOf(record: RunRecord): BackendName {
+	return record.backend ?? "herdr";
+}
 
-interface HerdrEnvelope {
-	result?: Record<string, unknown>;
-	error?: { code?: string; message?: string };
+function handleOf(record: RunRecord): BackendHandle | undefined {
+	if (record.handle) return record.handle;
+	if (!record.tabId && !record.paneId) return undefined;
+	return {
+		workspaceId: record.workspaceId ?? "",
+		tabId: record.tabId ?? "",
+		paneId: record.paneId ?? "",
+		agent: record.agentName ?? "",
+	};
 }
 
 class NonRetryableSubagentError extends Error {}
-
-class HerdrError extends Error {
-	constructor(
-		message: string,
-		readonly code?: string,
-	) {
-		super(message);
-	}
-}
-
-function parseEnvelope(raw: string): HerdrEnvelope | undefined {
-	if (!raw) return undefined;
-	try {
-		return JSON.parse(raw) as HerdrEnvelope;
-	} catch {
-		return undefined;
-	}
-}
-
-/** Run a herdr CLI command that answers with a JSON envelope on stdout. */
-async function herdrJson(
-	pi: ExtensionAPI,
-	args: string[],
-	options: { timeout?: number; signal?: AbortSignal } = {},
-): Promise<Record<string, unknown>> {
-	const run = await pi.exec("herdr", args, { timeout: options.timeout ?? 15_000, signal: options.signal });
-	const envelope = parseEnvelope(run.stdout.trim()) ?? parseEnvelope(run.stderr.trim());
-	if (envelope?.error) {
-		throw new HerdrError(envelope.error.message || "herdr command failed", envelope.error.code);
-	}
-	if (run.code !== 0 || !envelope?.result) {
-		const detail = run.stderr.trim() || run.stdout.trim() || `exit code ${run.code}`;
-		throw new HerdrError(`herdr ${args.slice(0, 3).join(" ")} failed: ${detail}`);
-	}
-	return envelope.result;
-}
-
-/** Run a herdr CLI command whose success contract is exit 0, with no JSON output required. */
-export async function herdrOk(pi: ExtensionAPI, args: string[], options: { timeout?: number } = {}): Promise<void> {
-	const run = await pi.exec("herdr", args, { timeout: options.timeout ?? 15_000 });
-	if (run.code === 0) return;
-	for (const raw of [run.stderr.trim(), run.stdout.trim()]) {
-		const envelope = parseEnvelope(raw);
-		if (envelope?.error) {
-			throw new HerdrError(envelope.error.message || "herdr command failed", envelope.error.code);
-		}
-	}
-	const detail = run.stderr.trim() || run.stdout.trim() || `exit code ${run.code}`;
-	throw new HerdrError(`herdr ${args.slice(0, 3).join(" ")} failed: ${detail}`);
-}
-
-/** `herdr pane read` answers with plain text, not JSON. */
-async function herdrPaneRead(pi: ExtensionAPI, paneId: string, lines: number): Promise<string | undefined> {
-	try {
-		const run = await pi.exec(
-			"herdr",
-			["pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines)],
-			{ timeout: 10_000 },
-		);
-		return run.code === 0 ? run.stdout : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function pick(record: unknown, key: string): unknown {
-	return record && typeof record === "object" ? (record as Record<string, unknown>)[key] : undefined;
-}
-
-function pickString(record: unknown, key: string): string | undefined {
-	const value = pick(record, key);
-	return typeof value === "string" ? value : undefined;
-}
-
-type AgentProbe =
-	| { state: "alive"; status: AgentStatus; sessionFile?: string }
-	| { state: "gone" }
-	| { state: "unknown" };
-
-/** Herdr's view of the pane occupant: alive (with lifecycle state), gone, or unknown (transient error). */
-async function probeAgent(pi: ExtensionAPI, paneId: string): Promise<AgentProbe> {
-	try {
-		const result = await herdrJson(pi, ["agent", "get", paneId], { timeout: 10_000 });
-		const agent = pick(result, "agent");
-		const status = (pickString(agent, "agent_status") ?? "unknown") as AgentStatus;
-		const session = pick(agent, "agent_session");
-		const sessionFile = pickString(session, "kind") === "path" ? pickString(session, "value") : undefined;
-		return { state: "alive", status, sessionFile };
-	} catch (error) {
-		if (error instanceof HerdrError && (error.code === "agent_not_found" || error.code === "pane_not_found")) {
-			return { state: "gone" };
-		}
-		return { state: "unknown" };
-	}
-}
 
 /* -------------------------------------------------------------------------- */
 /* git / worktrees                                                             */
@@ -311,15 +245,18 @@ function branchFor(profile: string, runId: string): string {
 }
 
 /**
- * Create a Herdr-managed worktree workspace for one run. Returns undefined when
- * the working directory is not inside a Git repository.
+ * Create an isolated checkout for one run on a fresh branch from committed
+ * HEAD. Herdr manages its own worktree workspace; other backends get a plain
+ * `git worktree add` under the agent directory. Returns undefined when the
+ * working directory is not inside a Git repository.
  */
 async function createWorktree(
 	pi: ExtensionAPI,
+	backend: SubagentBackend,
 	sourceCwd: string,
 	branch: string,
 	label: string,
-): Promise<{ info: WorktreeInfo; cwd: string; rootTabId?: string } | undefined> {
+): Promise<{ info: WorktreeInfo; cwd: string; placeholder?: BackendHandle } | undefined> {
 	const top = await git(pi, sourceCwd, ["rev-parse", "--show-toplevel"]);
 	if (!top.ok || !top.out) return undefined;
 	const repoRoot = top.out;
@@ -329,26 +266,25 @@ async function createWorktree(
 	}
 	const base = head.out;
 
-	const args = ["worktree", "create", "--cwd", repoRoot, "--branch", branch, "--label", label, "--no-focus", "--base", base];
-	const result = await herdrJson(pi, args, { timeout: 60_000 });
-	const worktree = pick(result, "worktree");
-	const workspace = pick(result, "workspace");
-	const tab = pick(result, "tab");
-	const checkout = pickString(worktree, "path") ?? pickString(pick(workspace, "worktree"), "checkout_path");
-	if (!checkout) throw new Error("herdr worktree create did not return a checkout path.");
-	const relative = path.relative(repoRoot, sourceCwd);
-	const cwd = relative && !relative.startsWith("..") ? path.join(checkout, relative) : checkout;
+	let checkout: string;
+	let workspaceId: string | undefined;
+	let placeholder: BackendHandle | undefined;
+	if (backend.createCheckout) {
+		({ path: checkout, workspaceId, placeholder } = await backend.createCheckout({ repoRoot, base, branch, label }));
+	} else {
+		const repoSlug = path.basename(repoRoot).replace(/[^A-Za-z0-9._-]+/g, "-") || "repo";
+		checkout = path.join(getAgentDir(), WORKTREES_DIR, `${repoSlug}-${branch.replace(/\//g, "-")}`);
+		await mkdir(path.dirname(checkout), { recursive: true, mode: 0o700 });
+		const added = await git(pi, repoRoot, ["worktree", "add", "-b", branch, checkout, base]);
+		if (!added.ok) throw new Error(`git worktree add failed: ${added.err || "unknown error"}`);
+	}
+	// --show-prefix survives symlinked paths (macOS /tmp) where path.relative would not.
+	const prefix = await git(pi, sourceCwd, ["rev-parse", "--show-prefix"]);
+	const cwd = prefix.ok && prefix.out ? path.join(checkout, prefix.out) : checkout;
 	return {
-		info: {
-			repoRoot,
-			path: checkout,
-			branch,
-			base: base!,
-			workspaceId: pickString(workspace, "workspace_id"),
-			state: "active",
-		},
+		info: { repoRoot, path: checkout, branch, base, workspaceId, state: "active" },
 		cwd: existsSync(cwd) ? cwd : checkout,
-		rootTabId: pickString(tab, "tab_id"),
+		placeholder,
 	};
 }
 
@@ -367,9 +303,10 @@ async function inspectWorktree(pi: ExtensionAPI, info: WorktreeInfo): Promise<Wo
 
 /**
  * Remove a clean checkout, keeping its branch when it has commits. A dirty
- * checkout (or one that cannot be inspected) is always retained.
+ * checkout (or one that cannot be inspected) is always retained. Never forced.
  */
 async function releaseWorktree(pi: ExtensionAPI, info: WorktreeInfo): Promise<WorktreeInfo> {
+	if (info.state === "removed" || !existsSync(info.path)) return info;
 	const inspected = await inspectWorktree(pi, info);
 	if (inspected.dirty) {
 		return { ...inspected, state: "retained", note: "Uncommitted changes; checkout retained for inspection." };
@@ -515,7 +452,7 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string): void {
 			})
 			.catch((error) => {
 				console.error(
-					`[herdr-subagent] Failed to write result: ${error instanceof Error ? error.message : String(error)}`,
+					`[subagent] Failed to write result: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			})
 			.finally(() => {
@@ -534,7 +471,7 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string): void {
 		) => void
 	)("agent_settled", async (_event, ctx) => {
 		await report(ctx);
-		// The parent closes the Herdr tab after collecting the result. Shutting Pi
+		// The parent closes the tab/window after collecting the result. Shutting Pi
 		// down first gives its session lifecycle a chance to flush cleanly.
 		if (process.env[EXIT_ON_FINISH_ENV] === "1") ctx.shutdown();
 	});
@@ -548,16 +485,29 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string): void {
 	});
 }
 
+
+/**
+ * tmux children read their task from a private file and submit it themselves,
+ * so no task text is typed into a terminal or passed through a shell. The
+ * started marker tells the parent the task is in; it also keeps a reloaded
+ * child from submitting twice.
+ */
+function registerTaskSubmission(pi: ExtensionAPI, taskPath: string, startedPath: string): void {
+	pi.on("session_start", async () => {
+		if (existsSync(startedPath)) return;
+		const task = (await readFile(taskPath, "utf8")).replace(/\n$/, "");
+		setTimeout(() => {
+			pi.sendUserMessage(task);
+			void writeFile(startedPath, `${Date.now()}\n`, { encoding: "utf8", mode: 0o600 }).catch((error) =>
+				console.error(`[subagent] Failed to write start marker: ${error instanceof Error ? error.message : String(error)}`),
+			);
+		}, TASK_SUBMIT_DELAY_MS);
+	});
+}
+
 /* -------------------------------------------------------------------------- */
 /* helpers                                                                     */
 /* -------------------------------------------------------------------------- */
-
-function trimPane(output: string): string {
-	const lines = output.replace(/\r/g, "").split("\n");
-	while (lines.length > 0 && !lines[0]?.trim()) lines.shift();
-	while (lines.length > 0 && !lines[lines.length - 1]?.trim()) lines.pop();
-	return lines.slice(-PANE_PREVIEW_LINES).join("\n");
-}
 
 function formatDuration(startedAt: number | undefined, finishedAt = Date.now()): string | undefined {
 	if (startedAt === undefined) return undefined;
@@ -567,12 +517,12 @@ function formatDuration(startedAt: number | undefined, finishedAt = Date.now()):
 	return `${minutes}m ${seconds % 60}s`;
 }
 
-/** herdr agent names must match [a-z][a-z0-9_-]{0,31} and be unique among live agents. */
+/** herdr agent names must match [a-z][a-z0-9_-]{0,31} and be unique among live agents; tmux reuses them as window names. */
 function agentNameFor(id: string, prefix = "sub"): string {
 	return `${prefix}-${shortId(id)}`;
 }
 
-function tabLabelFor(task: string, prefix = "sub"): string {
+function labelFor(task: string, prefix = "sub"): string {
 	const firstLine = task.trim().split("\n", 1)[0] ?? "";
 	const compact = firstLine.replace(/\s+/g, " ").trim();
 	const label = compact.length > 28 ? `${compact.slice(0, 27)}…` : compact;
@@ -580,19 +530,19 @@ function tabLabelFor(task: string, prefix = "sub"): string {
 }
 
 function detailsFromRecord(record: RunRecord, status: RunStatus, extra: Partial<RunDetails> = {}): RunDetails {
+	const backend = backendNameOf(record);
+	const handle = handleOf(record);
+	const commands = handle ? commandsFor(backend, handle) : undefined;
 	return {
 		status,
 		task: record.task,
 		cwd: record.cwd,
-		workspaceId: record.workspaceId,
-		tabId: record.tabId,
-		paneId: record.paneId,
+		backend,
+		target: commands?.target ?? `${backend} (not launched)`,
 		agentName: record.agentName,
-		attachCommand: record.tabId ? `herdr tab focus ${record.tabId}` : "",
-		captureCommand: record.paneId
-			? `herdr pane read ${record.paneId} --source recent-unwrapped --lines ${CAPTURE_LINES}`
-			: "",
-		killCommand: record.tabId ? `herdr tab close ${record.tabId}` : "",
+		attachCommand: commands?.attach ?? "",
+		captureCommand: commands?.capture ?? "",
+		killCommand: commands?.close ?? "",
 		provider: record.provider,
 		model: record.model,
 		thinking: record.thinking,
@@ -609,9 +559,8 @@ const AGENT_STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "done
 const RUN_DETAIL_STRINGS = [
 	"task",
 	"cwd",
-	"workspaceId",
-	"tabId",
-	"paneId",
+	"backend",
+	"target",
 	"agentName",
 	"attachCommand",
 	"captureCommand",
@@ -643,15 +592,20 @@ export function isRunDetails(value: unknown): value is RunDetails {
 	);
 }
 
+/** tmux sees processes, not Pi's state: it cannot tell whether a child is waiting for input. */
+const TMUX_BLOCKED_NOTE = "tmux cannot report whether the child is waiting for input; attach if it stops making progress.";
+
 function partialText(details: RunDetails): string {
 	const lines = [
-		`Subagent ${details.status} in herdr pane ${details.paneId} (tab ${details.tabId})${details.runId ? `, run ${shortId(details.runId)}` : ""}.`,
+		`Subagent ${details.status} in ${details.target}${details.runId ? `, run ${shortId(details.runId)}` : ""}.`,
 		`Attach: ${details.attachCommand}`,
 		`Capture: ${details.captureCommand}`,
 	];
 	if (details.worktree) lines.push(`Worktree: ${details.worktree.path} (branch ${details.worktree.branch})`);
 	if (details.agentStatus === "blocked") {
 		lines.push(`herdr reports the child is BLOCKED and waiting for input. Attach to answer it.`);
+	} else if (details.backend === "tmux") {
+		lines.push(TMUX_BLOCKED_NOTE);
 	}
 	if (details.pane) lines.push("", details.pane);
 	return lines.join("\n");
@@ -673,9 +627,7 @@ export function resultText(details: RunDetails): string {
 	if (details.stopReason) lines.push(`Stop reason: ${details.stopReason}`);
 	if (details.error) lines.push(`Error: ${details.error}`);
 	lines.push(
-		details.autoClosed
-			? `herdr: pane ${details.paneId}, tab ${details.tabId} (auto-closed)`
-			: `herdr: pane ${details.paneId}, tab ${details.tabId}, agent ${details.agentName}`,
+		details.autoClosed ? `${details.target} (auto-closed)` : `${details.target}, agent ${details.agentName}`,
 	);
 	if (!details.autoClosed) {
 		lines.push(
@@ -800,135 +752,6 @@ function modelCandidates(profile: AgentProfile): Array<string | undefined> {
 	return profile.model === undefined ? [undefined] : Array.isArray(profile.model) ? profile.model : [profile.model];
 }
 
-/** Create a background tab whose shell carries the child environment. */
-async function createChildTab(
-	pi: ExtensionAPI,
-	options: { workspaceId?: string; cwd: string; label: string; env: Record<string, string> },
-): Promise<{ workspaceId: string; tabId: string; paneId: string }> {
-	const env = Object.entries(options.env).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
-	const workspaceId = options.workspaceId ?? process.env.HERDR_WORKSPACE_ID;
-	if (workspaceId) {
-		const result = await herdrJson(pi, [
-			"tab",
-			"create",
-			"--workspace",
-			workspaceId,
-			"--cwd",
-			options.cwd,
-			"--label",
-			options.label,
-			...env,
-			"--no-focus",
-		]);
-		const paneId = pickString(pick(result, "root_pane"), "pane_id");
-		const tabId = pickString(pick(result, "tab"), "tab_id");
-		if (!paneId || !tabId) throw new Error("herdr tab create did not return a pane id.");
-		return { workspaceId, tabId, paneId };
-	}
-
-	// Not running inside a herdr pane: park children in their own workspace.
-	const result = await herdrJson(pi, [
-		"workspace",
-		"create",
-		"--cwd",
-		options.cwd,
-		"--label",
-		options.label,
-		...env,
-		"--no-focus",
-	]);
-	const paneId = pickString(pick(result, "root_pane"), "pane_id");
-	const tabId = pickString(pick(result, "tab"), "tab_id");
-	const createdWorkspaceId = pickString(pick(result, "workspace"), "workspace_id");
-	if (!paneId || !tabId || !createdWorkspaceId) throw new Error("herdr workspace create did not return a pane id.");
-	return { workspaceId: createdWorkspaceId, tabId, paneId };
-}
-
-/**
- * Start Pi in a fresh pane and submit the task. Herdr's `agent start` verifies
- * the agent is up before returning, so there is no type-into-shell race.
- */
-async function startChild(
-	pi: ExtensionAPI,
-	paneId: string,
-	agentName: string,
-	piArgs: string[],
-	task: string,
-	submit = true,
-): Promise<void> {
-	const startAbort = new AbortController();
-	let started = false;
-	let exitedEarly = false;
-	// Herdr only reports a failed start at its timeout. Watch the pane's
-	// foreground process instead: once Pi has run and the shell is back in the
-	// foreground, Pi exited during startup (bad model, auth, crash).
-	const watchStartup = async (): Promise<void> => {
-		let sawChild = false;
-		let shellPolls = 0;
-		for (;;) {
-			await new Promise((resolve) => setTimeout(resolve, 1_000));
-			if (started || startAbort.signal.aborted) return;
-			try {
-				const info = pick(await herdrJson(pi, ["pane", "process-info", "--pane", paneId], { timeout: 5_000 }), "process_info");
-				const foreground = pick(info, "foreground_process_group_id");
-				const shell = pick(info, "shell_pid");
-				if (typeof foreground !== "number" || typeof shell !== "number") continue;
-				if (foreground !== shell) {
-					sawChild = true;
-					shellPolls = 0;
-					continue;
-				}
-				// A Pi that dies instantly may never be observed; two consecutive
-				// shell-foreground polls after launch mean the same thing.
-				shellPolls++;
-				if ((sawChild || shellPolls >= 3) && !started) {
-					exitedEarly = true;
-					startAbort.abort();
-					return;
-				}
-			} catch {
-				// Older Herdr or a transient error: rely on agent start's own timeout.
-			}
-		}
-	};
-	const watcher = watchStartup();
-	try {
-		await herdrJson(
-			pi,
-			["agent", "start", agentName, "--kind", "pi", "--pane", paneId, "--timeout", String(START_TIMEOUT_MS), "--", ...piArgs],
-			{ timeout: START_TIMEOUT_MS + 10_000, signal: startAbort.signal },
-		);
-		if (exitedEarly) throw new Error("Pi exited during startup.");
-		started = true;
-	} catch (error) {
-		started = true;
-		const pane = await herdrPaneRead(pi, paneId, 30);
-		const message = exitedEarly ? "Pi exited during startup." : error instanceof Error ? error.message : String(error);
-		throw new ChildStartupError(`Child Pi did not start: ${message}${pane ? `\n\n${trimPane(pane)}` : ""}`);
-	} finally {
-		startAbort.abort();
-		void watcher;
-	}
-	if (!submit) return;
-	await herdrJson(
-		pi,
-		[
-			"agent",
-			"prompt",
-			paneId,
-			task,
-			"--wait",
-			"--until",
-			"working",
-			"--until",
-			"blocked",
-			"--timeout",
-			String(PROMPT_TIMEOUT_MS),
-		],
-		{ timeout: PROMPT_TIMEOUT_MS + 10_000 },
-	);
-}
-
 async function readResult(resultPath: string): Promise<ChildResult | undefined> {
 	try {
 		return JSON.parse(await readFile(resultPath, "utf8")) as ChildResult;
@@ -944,18 +767,16 @@ interface MonitorProgress {
 }
 
 class ChildExitedError extends Error {}
-/** Pi never became ready (bad model/provider, auth, crash): eligible for model fallback. */
-class ChildStartupError extends Error {}
 
 /**
- * Wait for the child's result file. fs.watch wakes the loop on writes; Herdr is
- * probed every PROBE_INTERVAL_MS for blocked state and liveness only.
+ * Wait for the child's result file. fs.watch wakes the loop on writes; the
+ * backend is probed every PROBE_INTERVAL_MS for liveness and blocked state only.
  */
 async function monitorChild(
-	pi: ExtensionAPI,
+	backend: SubagentBackend,
+	handle: BackendHandle,
 	options: {
 		resultPath: string;
-		paneId: string;
 		signal: AbortSignal;
 		readPane: boolean;
 		onProgress: (progress: MonitorProgress) => void;
@@ -982,18 +803,20 @@ async function monitorChild(
 
 			if (Date.now() >= nextProbe) {
 				nextProbe = Date.now() + PROBE_INTERVAL_MS;
-				const probe = await probeAgent(pi, options.paneId);
-				const paneText = options.readPane ? await herdrPaneRead(pi, options.paneId, PANE_READ_LINES) : undefined;
+				const probe = await backend.probe(handle);
+				const paneText = options.readPane ? await backend.tail(handle, PANE_READ_LINES) : undefined;
 				let changed = false;
-				if (probe.state === "alive") {
-					goneSince = undefined;
-					if (probe.sessionFile) progress.sessionFile = probe.sessionFile;
-					if (probe.status !== progress.agentStatus) {
-						progress.agentStatus = probe.status;
-						changed = true;
-					}
-				} else if (probe.state === "gone") {
+				if (probe === "gone") {
 					goneSince ??= Date.now();
+				} else if (probe !== "unknown") {
+					goneSince = undefined;
+					if (typeof probe === "object") {
+						if (probe.sessionFile) progress.sessionFile = probe.sessionFile;
+						if (probe.status !== progress.agentStatus) {
+							progress.agentStatus = probe.status;
+							changed = true;
+						}
+					}
 				}
 				const pane = paneText ? trimPane(paneText) : "";
 				if (pane && pane !== progress.pane) {
@@ -1005,7 +828,7 @@ async function monitorChild(
 				if (goneSince !== undefined && Date.now() - goneSince >= EXIT_GRACE_MS) {
 					const late = await readResult(options.resultPath);
 					if (late) return { result: late, progress };
-					const finalPane = (await herdrPaneRead(pi, options.paneId, 30)) ?? "";
+					const finalPane = (await backend.tail(handle, 30)) ?? "";
 					throw new ChildExitedError(
 						`Child Pi exited before reporting a result.${finalPane ? `\n\n${trimPane(finalPane)}` : ""}`,
 					);
@@ -1033,7 +856,7 @@ async function saveRecord(record: RunRecord): Promise<void> {
 	try {
 		await writeJsonAtomic(path.join(runDirFor(record.parentSessionId, record.id), "run.json"), record);
 	} catch (error) {
-		console.error(`[herdr-subagent] Failed to save run record: ${error instanceof Error ? error.message : String(error)}`);
+		console.error(`[subagent] Failed to save run record: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
 
@@ -1117,25 +940,31 @@ function retentionDays(): number {
 /* extension                                                                   */
 /* -------------------------------------------------------------------------- */
 
-export default function herdrSubagentExtension(pi: ExtensionAPI): void {
+export default function subagentExtension(pi: ExtensionAPI): void {
 	if (process.env[CHILD_ENV] === "1") {
 		const resultPath = process.env[RESULT_ENV];
 		if (!resultPath) {
-			console.error(`[herdr-subagent] ${RESULT_ENV} is required in child mode.`);
+			console.error(`[subagent] ${RESULT_ENV} is required in child mode.`);
 			return;
 		}
 		registerChildReporter(pi, resultPath);
+		const taskPath = process.env[TASK_ENV];
+		if (taskPath) registerTaskSubmission(pi, taskPath, `${resultPath}.started`);
 		return;
 	}
 
-	/** Blocking-run tabs; always closed on shutdown because their tool call is gone. */
-	const blockingTabs = new Set<string>();
-	/** Live async and blocking runs, keyed by run id. */
+	const backends: Record<BackendName, SubagentBackend> = {
+		herdr: new HerdrBackend(pi),
+		tmux: new TmuxBackend(pi),
+	};
+	const backendFor = (record: RunRecord): SubagentBackend => backends[backendNameOf(record)];
+
+	/** Live async and blocking runs, keyed by run id, from before launch until settled. */
 	const liveRuns = new Map<string, LiveRun>();
 	let shuttingDown = false;
 	let currentCtx: ExtensionContext | undefined;
 
-	const asyncRuns = () => [...liveRuns.values()].filter((run) => run.record.kind === "async");
+	const asyncRuns = () => [...liveRuns.values()].filter((run) => run.record.kind === "async" && run.launched);
 
 	const updateAsyncWidget = (ctx: ExtensionContext | undefined): void => {
 		if (!ctx?.hasUI || shuttingDown) return;
@@ -1144,18 +973,21 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			ctx.ui.setWidget(ASYNC_WIDGET_ID, undefined);
 			return;
 		}
-		const lines = [`Async Herdr subagents (${runs.length})`];
+		const lines = [`Async subagents (${runs.length})`];
 		for (const run of runs) {
 			const status =
 				run.details.agentStatus === "blocked"
 					? "blocked · needs input"
-					: (run.details.agentStatus ?? run.details.status);
+					: run.details.agentStatus && run.details.agentStatus !== "unknown"
+						? run.details.agentStatus
+						: run.details.status;
 			const worktree = run.record.worktree ? ` · ${run.record.worktree.branch}` : "";
 			lines.push(`  ${shortId(run.record.id)} ${run.record.profile} · ${status}${worktree} · ${run.details.attachCommand}`);
 		}
 		ctx.ui.setWidget(ASYNC_WIDGET_ID, lines);
 	};
 
+	/** At most once: `delivered` is persisted before the steer, so a crash in between drops rather than repeats it. */
 	const deliverAsyncResult = async (run: LiveRun, details: RunDetails): Promise<void> => {
 		if (shuttingDown || run.controller.signal.aborted || run.record.delivered) return;
 		const outcome = details.status === "completed" ? "completed" : "failed";
@@ -1164,7 +996,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		pi.sendMessage(
 			{
 				customType: ASYNC_RESULT_TYPE,
-				content: truncateToolText(`Async Herdr subagent "${run.record.profile}" ${outcome}.\n\n${resultText(details)}`),
+				content: truncateToolText(`Async subagent "${run.record.profile}" ${outcome}.\n\n${resultText(details)}`),
 				display: true,
 				details: { ...details, runId: run.record.id, profile: run.record.profile },
 			},
@@ -1172,52 +1004,62 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		);
 	};
 
-	/** Close a run's tab; true once the tab is known to be gone. */
-	const closeTab = async (tabId: string): Promise<boolean> => {
-		if (!tabId) return true;
+	/** Close one target through its run's backend; true once it is known to be gone. Idempotent. */
+	const closedTargets = new Set<string>();
+	const closeTarget = async (
+		backend: SubagentBackend,
+		handle: BackendHandle | undefined,
+		options?: { verify?: boolean },
+	): Promise<boolean> => {
+		if (!handle) return true;
+		const key = `${backend.name}:${JSON.stringify(handle)}`;
+		if (closedTargets.has(key)) return true;
 		try {
-			await herdrOk(pi, ["tab", "close", tabId], { timeout: 10_000 });
-			blockingTabs.delete(tabId);
+			await backend.close(handle, options);
+			closedTargets.add(key);
 			return true;
-		} catch (error) {
-			if (error instanceof HerdrError && error.code === "tab_not_found") {
-				blockingTabs.delete(tabId);
-				return true;
-			}
+		} catch {
 			return false;
 		}
 	};
 
+	const closePending = async (run: LiveRun): Promise<void> => {
+		const backend = backendFor(run.record);
+		for (const handle of run.pending.splice(0)) await closeTarget(backend, handle);
+	};
+
 	/**
-	 * Final bookkeeping for a settled child: close its tab, release any worktree,
-	 * and build the reported details.
+	 * Final bookkeeping for a settled child: close its target, release any
+	 * worktree, and build the reported details.
 	 */
 	const settle = async (
 		record: RunRecord,
 		outcome: { result?: ChildResult; error?: string; progress: MonitorProgress },
-		options: { autoClose: boolean },
+		options: { autoClose: boolean; verifyClose?: boolean },
 	): Promise<RunDetails> => {
+		const backend = backendFor(record);
 		const result = outcome.result;
 		const status: RunStatus = result ? (result.status === "completed" ? "completed" : "failed") : "failed";
 		let worktree = record.worktree;
 		let autoClosed = false;
 		const liveWorktree = worktree && worktree.state !== "removed" && existsSync(worktree.path);
 		if (options.autoClose) {
-			// A dirty worktree keeps its tab so the checkout stays one click away.
+			// A dirty worktree keeps its target so the checkout stays one attach away.
 			if (worktree && liveWorktree) {
 				const inspected = await inspectWorktree(pi, worktree);
 				if (inspected.dirty) {
 					worktree = { ...inspected, state: "retained", note: "Uncommitted changes; checkout and tab retained for inspection." };
 				} else {
-					autoClosed = await closeTab(record.tabId);
-					worktree = await releaseWorktree(pi, worktree);
+					autoClosed = await closeTarget(backend, handleOf(record), { verify: options.verifyClose });
+					worktree = autoClosed
+						? await releaseWorktree(pi, worktree)
+						: { ...inspected, state: "retained", note: "Child target could not be confirmed closed; checkout retained." };
 				}
 			} else {
-				autoClosed = await closeTab(record.tabId);
+				autoClosed = await closeTarget(backend, handleOf(record), { verify: options.verifyClose });
 			}
-		} else {
-			blockingTabs.delete(record.tabId); // Hand the settled tab over to the user.
-			if (worktree && liveWorktree) worktree = { ...(await inspectWorktree(pi, worktree)), state: "active" };
+		} else if (worktree && liveWorktree) {
+			worktree = { ...(await inspectWorktree(pi, worktree)), state: "active" };
 		}
 
 		record.status = status;
@@ -1248,6 +1090,8 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		sourceCwd: string;
 		ctx: ExtensionContext;
 		signal: AbortSignal;
+		/** Owns the run; aborted on session shutdown or /reload detach. */
+		controller: AbortController;
 		autoClose: boolean;
 		readPane: boolean;
 		onLaunched?: (run: LiveRun) => void;
@@ -1259,40 +1103,31 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	 * settle it. Shared by blocking and async runs. Errors before the first
 	 * successful launch propagate; later failures resolve as failed details.
 	 */
-	const executeRun = async (options: ExecuteOptions): Promise<{ details: RunDetails; record: RunRecord }> => {
+	const runJobs = new Set<Promise<unknown>>();
+	const executeRun = (options: ExecuteOptions): Promise<{ details: RunDetails; record: RunRecord }> => {
+		const job = executeRunNow(options);
+		runJobs.add(job);
+		void job.then(
+			() => runJobs.delete(job),
+			() => runJobs.delete(job),
+		);
+		return job;
+	};
+
+	const executeRunNow = async (options: ExecuteOptions): Promise<{ details: RunDetails; record: RunRecord }> => {
 		const { profile, ctx } = options;
 		const thinking = profile.thinking ?? pi.getThinkingLevel();
 		const childTools = resolveChildTools(pi, profile.tools ?? pi.getActiveTools(), profile.name);
 		const candidates = modelCandidates(profile);
+		// Resolved once, before any side effect; every attempt and cleanup reuses it.
+		const backend = await resolveBackend(backends, (await configuredBackend()).setting);
 		const parentSessionId = ctx.sessionManager.getSessionId();
 		const id = randomUUID();
 		const runDir = runDirFor(parentSessionId, id);
 		const sessionDir = path.join(runDir, "session");
 		await mkdir(sessionDir, { recursive: true, mode: 0o700 });
 		const trusted = isSameOrDescendant(path.resolve(ctx.cwd), options.sourceCwd) && ctx.isProjectTrusted();
-
-		// Isolation: a fresh worktree per run.
-		let worktree: WorktreeInfo | undefined;
-		let cwd = options.sourceCwd;
-		let worktreeRootTab: string | undefined;
-		let isolationNote = "";
-		if (profile.worktree) {
-			const created = await createWorktree(
-				pi,
-				options.sourceCwd,
-				branchFor(profile.name, id),
-				tabLabelFor(options.task, profile.name),
-			);
-			if (created) {
-				worktree = created.info;
-				cwd = created.cwd;
-				worktreeRootTab = created.rootTabId;
-			} else {
-				isolationNote = "Note: worktree isolation was requested but the directory is not a Git repository; ran in place.";
-			}
-		}
-		const task = worktree ? `${options.task}${worktreeNote(worktree)}` : options.task;
-		await writeFile(path.join(runDir, "task.md"), `${task}\n`, { encoding: "utf8", mode: 0o600 });
+		const prefix = options.kind === "async" ? "async" : "sub";
 
 		const record: RunRecord = {
 			version: 1,
@@ -1302,32 +1137,52 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			parentSessionId,
 			task: options.task,
 			sourceCwd: options.sourceCwd,
-			cwd,
+			cwd: options.sourceCwd,
 			provider: "",
 			model: "",
 			thinking,
 			tools: childTools,
-			agentName: agentNameFor(id, options.kind === "async" ? "async" : "sub"),
-			workspaceId: "",
-			tabId: "",
-			paneId: "",
-			worktree,
+			agentName: agentNameFor(id, prefix),
+			backend: backend.name,
 			status: "queued",
 			startedAt: Date.now(),
 		};
+		const live: LiveRun = {
+			record,
+			details: detailsFromRecord(record, "queued"),
+			controller: options.controller,
+			launched: false,
+			pending: [],
+		};
+		liveRuns.set(id, live);
+		const signal = AbortSignal.any([options.signal, options.controller.signal]);
 
-		let live: LiveRun | undefined;
-		let launchedOnce = false;
-		/** A failed attempt's tab, closed only after its replacement exists (a worktree workspace closes with its last tab). */
-		let staleTab: string | undefined;
+		let isolationNote = "";
 		try {
+			if (profile.worktree) {
+				const created = await createWorktree(pi, backend, options.sourceCwd, branchFor(profile.name, id), labelFor(options.task, profile.name));
+				if (created) {
+					record.worktree = created.info;
+					record.cwd = created.cwd;
+					if (created.placeholder) live.pending.push(created.placeholder);
+					await saveRecord(record);
+				} else {
+					isolationNote = "Note: worktree isolation was requested but the directory is not a Git repository; ran in place.";
+				}
+			}
+			const worktree = record.worktree;
+			const task = worktree ? `${options.task}${worktreeNote(worktree)}` : options.task;
+			const taskPath = path.join(runDir, "task.md");
+			await writeFile(taskPath, `${task}\n`, { encoding: "utf8", mode: 0o600 });
+
 			for (let index = 0; index < candidates.length; index++) {
 				const selected = resolveModel(ctx, undefined, candidates[index]);
 				const resultPath = path.join(runDir, index === 0 ? "result.json" : `result.${index}.json`);
 				record.provider = selected.provider;
 				record.model = selected.model;
 				record.resultPath = resultPath;
-				record.agentName = agentNameFor(index === 0 ? id : randomUUID(), options.kind === "async" ? "async" : "sub");
+				record.agentName = agentNameFor(index === 0 ? id : randomUUID(), prefix);
+				record.handle = undefined;
 
 				const piArgs = [
 					"--provider",
@@ -1346,70 +1201,68 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 					EXTENSION_PATH,
 				];
 
-				options.signal.throwIfAborted();
-				const created = await createChildTab(pi, {
-					workspaceId: worktree?.workspaceId,
-					cwd,
-					label: tabLabelFor(options.task, options.kind === "async" ? "async" : "sub"),
-					env: {
-						[CHILD_ENV]: "1",
-						[RESULT_ENV]: resultPath,
-						[EXIT_ON_FINISH_ENV]: options.autoClose ? "1" : "0",
-					},
-				});
-				for (const tab of [worktreeRootTab, staleTab]) if (tab) await closeTab(tab);
-				worktreeRootTab = undefined;
-				staleTab = undefined;
-				record.workspaceId = created.workspaceId;
-				record.tabId = created.tabId;
-				record.paneId = created.paneId;
-				record.status = "running";
-				if (options.kind === "blocking") blockingTabs.add(created.tabId);
-
-				const details = () => live?.details ?? detailsFromRecord(record, "running");
+				signal.throwIfAborted();
 				let result: ChildResult | undefined;
 				let failure: Error | undefined;
 				let progress: MonitorProgress = {};
 				try {
-					await startChild(pi, created.paneId, record.agentName, piArgs, task);
-					options.signal.throwIfAborted();
+					await backend.launch(
+						{
+							runId: id,
+							agentName: record.agentName,
+							label: labelFor(options.task, prefix),
+							cwd: record.cwd,
+							env: {
+								[CHILD_ENV]: "1",
+								[RESULT_ENV]: resultPath,
+								[EXIT_ON_FINISH_ENV]: options.autoClose ? "1" : "0",
+							},
+							piArgs,
+							task,
+							taskPath,
+							startedPath: `${resultPath}.started`,
+							workspaceId: worktree?.workspaceId,
+							signal,
+						},
+						async (handle) => {
+							// Persist the target before startup so shutdown and the next
+							// session start can find and close it.
+							record.handle = handle;
+							live.details = detailsFromRecord(record, "queued");
+							await saveRecord(record);
+							// A worktree workspace closes with its last tab: retire
+							// superseded targets only once this one exists.
+							await closePending(live);
+						},
+					);
+					signal.throwIfAborted();
+					record.status = "running";
 					await saveRecord(record);
-								if (!live) {
-						live = {
-							record,
-							details: detailsFromRecord(record, "running"),
-							controller: new AbortController(),
-						};
-						liveRuns.set(id, live);
-					} else {
-						live.details = detailsFromRecord(record, "running");
-					}
-					if (!launchedOnce) {
-						launchedOnce = true;
+					live.details = detailsFromRecord(record, "running");
+					if (!live.launched) {
+						live.launched = true;
 						options.onLaunched?.(live);
 					}
-					options.onProgress?.(details());
-					const combined = AbortSignal.any([options.signal, live.controller.signal]);
-					const monitored = await monitorChild(pi, {
+					options.onProgress?.(live.details);
+					const monitored = await monitorChild(backend, record.handle!, {
 						resultPath,
-						paneId: created.paneId,
-						signal: combined,
+						signal,
 						readPane: options.readPane,
 						onProgress: (update) => {
 							progress = update;
-							live!.details = detailsFromRecord(record, "running", {
+							live.details = detailsFromRecord(record, "running", {
 								pane: update.pane,
 								agentStatus: update.agentStatus,
 							});
-							options.onProgress?.(live!.details);
+							options.onProgress?.(live.details);
 						},
 					});
 					result = monitored.result;
 					progress = monitored.progress;
 				} catch (error) {
-					if (options.signal.aborted || live?.controller.signal.aborted) {
-						// Session shutdown closes its own tabs; a reload keeps them running.
-						if (!live?.detached && !shuttingDown) await closeTab(created.tabId);
+					if (signal.aborted) {
+						// Session shutdown closes its own targets; a reload keeps async ones running.
+						if (!live.detached) await closeTarget(backend, record.handle);
 						throw error;
 					}
 					failure = error instanceof Error ? error : new Error(String(error));
@@ -1423,33 +1276,38 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						: failure instanceof ChildStartupError ||
 							(failure !== undefined && !(failure instanceof ChildExitedError) && isRetryableProviderFailure(failure)));
 				if (retryable) {
-					if (worktree?.workspaceId) staleTab = created.tabId;
-					else await closeTab(created.tabId);
+					if (record.handle) {
+						if (worktree) live.pending.push(record.handle);
+						else await closeTarget(backend, record.handle);
+					}
 					continue;
 				}
-				if (!launchedOnce && failure) {
-					await closeTab(created.tabId);
+				if (!live.launched && failure) {
+					await closeTarget(backend, record.handle);
 					throw failure;
 				}
 				const settled = await settle(record, { result, error: failure?.message, progress }, {
 					autoClose: options.autoClose,
 				});
 				if (isolationNote) settled.error = settled.error ? `${settled.error}\n${isolationNote}` : isolationNote;
-				if (live) live.details = settled;
+				live.details = settled;
 				return { details: settled, record };
 			}
 			throw new Error("Every model candidate failed.");
 		} catch (error) {
-			if (staleTab) await closeTab(staleTab);
-			if (worktree && !live?.detached) {
+			if (!live.detached) {
+				await closePending(live);
 				// Launch failure or abort: drop a clean checkout (dirty ones are retained).
-				if (worktreeRootTab) await closeTab(worktreeRootTab);
-				record.worktree = await releaseWorktree(pi, worktree);
-				if (launchedOnce) await saveRecord(record);
+				if (record.worktree) record.worktree = await releaseWorktree(pi, record.worktree);
+				if (record.status === "queued" || record.status === "running") {
+					record.status = signal.aborted ? "cancelled" : "failed";
+					record.finishedAt = Date.now();
+				}
+				await saveRecord(record);
 			}
 			throw error;
 		} finally {
-			if (live && !live.detached) liveRuns.delete(id);
+			if (!live.detached) liveRuns.delete(id);
 			updateAsyncWidget(currentCtx);
 		}
 	};
@@ -1476,11 +1334,11 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			sourceCwd,
 			ctx,
 			signal: background.signal,
+			controller: background,
 			autoClose: true,
 			readPane: false,
 			onLaunched: (run) => {
 				liveRun = run;
-				run.controller = background;
 				signal?.removeEventListener("abort", onAbort);
 				updateAsyncWidget(ctx);
 				launched?.(run);
@@ -1513,25 +1371,45 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		]);
 	};
 
-	/** Re-attach monitors to async runs that survived /reload (or a crash). */
+	/** Close the target and release the checkout of a run whose owner died mid-flight (crash during launch or a blocking call). */
+	const cleanUpInterrupted = async (record: RunRecord): Promise<void> => {
+		// Target ids may have been reused since the crash: close only what is provably this run's.
+		if (!(await closeTarget(backendFor(record), handleOf(record), { verify: true }))) return;
+		if (record.worktree) record.worktree = await releaseWorktree(pi, record.worktree);
+		record.status = "cancelled";
+		record.delivered = true;
+		record.finishedAt ??= Date.now();
+		await saveRecord(record);
+	};
+
+	/** Re-attach monitors to async runs that survived /reload (or a crash), using each run's own backend. */
 	const reattach = async (ctx: ExtensionContext): Promise<void> => {
 		const records = await loadSessionRecords(ctx.sessionManager.getSessionId());
 		for (const record of records) {
-				if (record.kind !== "async" || record.delivered || liveRuns.has(record.id)) continue;
+			if (liveRuns.has(record.id)) continue;
+			const interrupted =
+				record.status === "queued" || (record.kind === "blocking" && record.status === "running");
+			if (interrupted && (handleOf(record) || record.worktree)) {
+				await cleanUpInterrupted(record);
+				continue;
+			}
+			if (record.kind !== "async" || record.delivered) continue;
 			if (record.status !== "running" && record.status !== "completed" && record.status !== "failed") continue;
+			const handle = handleOf(record);
 			const run: LiveRun = {
 				record,
 				details: detailsFromRecord(record, "running"),
 				controller: new AbortController(),
+				launched: true,
+				pending: [],
 			};
 			liveRuns.set(record.id, run);
 			void (async () => {
 				let details: RunDetails;
 				try {
-					if (!record.resultPath || !record.paneId) throw new Error("Run record is incomplete.");
-					const monitored = await monitorChild(pi, {
+					if (!record.resultPath || !handle) throw new Error("Run record is incomplete.");
+					const monitored = await monitorChild(backendFor(record), handle, {
 						resultPath: record.resultPath,
-						paneId: record.paneId,
 						signal: run.controller.signal,
 						readPane: false,
 						onProgress: (update) => {
@@ -1539,13 +1417,17 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 							updateAsyncWidget(currentCtx);
 						},
 					});
-					details = await settle(record, { result: monitored.result, progress: monitored.progress }, { autoClose: true });
+					details = await settle(
+						record,
+						{ result: monitored.result, progress: monitored.progress },
+						{ autoClose: true, verifyClose: true },
+					);
 				} catch (error) {
 					if (run.controller.signal.aborted) return;
 					details = await settle(
 						record,
 						{ error: error instanceof Error ? error.message : String(error), progress: {} },
-						{ autoClose: true },
+						{ autoClose: true, verifyClose: true },
 					);
 				} finally {
 					if (!run.detached) liveRuns.delete(record.id);
@@ -1564,7 +1446,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		const reason = (event as { reason?: string } | undefined)?.reason;
 		if (ctx.sessionManager?.getSessionId) {
 			await reattach(ctx).catch((error) =>
-				console.error(`[herdr-subagent] Re-attach failed: ${error instanceof Error ? error.message : String(error)}`),
+				console.error(`[subagent] Re-attach failed: ${error instanceof Error ? error.message : String(error)}`),
 			);
 			if (reason === "startup") {
 				void pruneRunDirs(retentionDays(), { keepSessionId: ctx.sessionManager.getSessionId() }).catch(() => undefined);
@@ -1577,55 +1459,94 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 		const profiles = await subagentProfiles.list();
 		if (profiles.length === 0) return;
 		const isolated = profiles.filter((profile) => profile.worktree).map((profile) => profile.name);
-		return {
-			systemPrompt:
-				event.systemPrompt +
-				"\n\nAgent profiles: A valid &name reference is the user's explicit request to delegate asynchronously with that profile. Route every valid &name through herdr_async, including &worker. Compose a complete, self-contained task for every child. Do not add model, thinking, or tool overrides; the profile owns them. The caller controls the number and ordering of calls unless the user explicitly requests references or parallelism. Use herdr_subagent only for a parent-selected blocking dependency." +
-				(isolated.length
-					? ` Profiles ${isolated.join(", ")} run in isolated Git worktrees on their own branch and do not see uncommitted parent changes; review the reported commits, then integrate the branch yourself.`
-					: ""),
-		};
+		event.systemPromptOptions.sections.agent_profiles =
+			`A valid &name reference is the user's explicit request to delegate asynchronously with that profile. Route every valid &name through ${ASYNC_TOOL}, including &worker. Compose a complete, self-contained task for every child. Do not add model, thinking, or tool overrides; the profile owns them. The caller controls the number and ordering of calls unless the user explicitly requests references or parallelism. Use ${BLOCKING_TOOL} only for a parent-selected blocking dependency.` +
+			(isolated.length
+				? ` Profiles ${isolated.join(", ")} run in isolated Git worktrees on their own branch and do not see uncommitted parent changes; review the reported commits, then integrate the branch yourself.`
+				: "");
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		const reason = (event as { reason?: string } | undefined)?.reason;
 		shuttingDown = true;
-		if (reason === "reload") {
-			// Keep async children running; the reloaded extension re-attaches.
-			for (const run of liveRuns.values()) {
-				if (run.record.kind !== "async") continue;
+		const closes: Array<Promise<unknown>> = [];
+		for (const run of liveRuns.values()) {
+			if (reason === "reload" && run.record.kind === "async" && run.launched) {
+				// Keep launched async children running; the reloaded extension re-attaches.
 				run.detached = true;
 				run.controller.abort();
+				continue;
 			}
-		} else {
-			for (const run of liveRuns.values()) {
-				if (run.record.kind !== "async") continue;
-				run.controller.abort();
-				run.record.status = "cancelled";
-				run.record.delivered = true;
-				await saveRecord(run.record);
-				await closeTab(run.record.tabId);
-			}
+			// Blocking calls and unfinished launches have no owner after shutdown.
+			run.controller.abort();
+			run.record.status = "cancelled";
+			run.record.delivered = true;
+			run.record.finishedAt = Date.now();
+			await saveRecord(run.record);
+			const backend = backendFor(run.record);
+			closes.push(closeTarget(backend, handleOf(run.record)), ...run.pending.splice(0).map((handle) => closeTarget(backend, handle)));
 		}
 		liveRuns.clear();
+		// Let in-flight launches persist and close targets created after cancellation before runtime invalidation.
+		await Promise.allSettled([...closes, ...runJobs]);
 		if (ctx?.hasUI) ctx.ui.setWidget(ASYNC_WIDGET_ID, undefined);
-		const tabs = [...blockingTabs];
-		blockingTabs.clear();
-		await Promise.allSettled(tabs.map((tab) => pi.exec("herdr", ["tab", "close", tab], { timeout: 10_000 })));
 	});
 
-	pi.registerCommand?.("herdr-prune", {
-		description: `Delete Herdr subagent run directories older than N days (default ${DEFAULT_RETENTION_DAYS}, or $${RETENTION_ENV})`,
+	pi.registerCommand?.("subagent-prune", {
+		description: `Delete subagent run directories older than N days (default ${DEFAULT_RETENTION_DAYS}, or $${RETENTION_ENV})`,
 		handler: async (args: string, ctx: ExtensionContext) => {
 			const days = args.trim() ? Number(args.trim()) : retentionDays() || DEFAULT_RETENTION_DAYS;
 			if (!Number.isFinite(days) || days < 0) {
-				ctx.ui.notify("Usage: /herdr-prune [days]", "error");
+				ctx.ui.notify("Usage: /subagent-prune [days]", "error");
 				return;
 			}
 			const removed = await pruneRunDirs(days === 0 ? Number.MIN_VALUE : days, {
 				keepSessionId: ctx.sessionManager.getSessionId(),
 			});
-			ctx.ui.notify(`Removed ${removed} Herdr subagent run director${removed === 1 ? "y" : "ies"}.`, "info");
+			ctx.ui.notify(`Removed ${removed} subagent run director${removed === 1 ? "y" : "ies"}.`, "info");
+		},
+	});
+
+	const BACKEND_CHOICES: BackendSetting[] = ["auto", "herdr", "tmux"];
+	pi.registerCommand?.("subagent-backend", {
+		description: "Show or set the subagent launch backend for new runs: auto, herdr, or tmux",
+		getArgumentCompletions: (prefix: string) =>
+			BACKEND_CHOICES.filter((choice) => choice.startsWith(prefix.trim())).map((choice) => ({ value: choice, label: choice })),
+		handler: async (args: string, ctx: ExtensionContext) => {
+			const requested = args.trim();
+			if (!requested) {
+				let text: string;
+				try {
+					const { setting, source } = await configuredBackend();
+					const from = source === "env" ? BACKEND_ENV : source === "file" ? settingsPath() : "default";
+					const resolved = await resolveBackend(backends, setting).then(
+						(backend) => backend.name,
+						(error: unknown) => `unavailable (${error instanceof Error ? error.message : String(error)})`,
+					);
+					text = `Subagent backend: ${setting} (${from}); new runs use ${resolved}.`;
+				} catch (error) {
+					text = error instanceof Error ? error.message : String(error);
+				}
+				ctx.ui.notify(text, "info");
+				return;
+			}
+			if (!BACKEND_CHOICES.includes(requested as BackendSetting)) {
+				ctx.ui.notify("Usage: /subagent-backend [auto|herdr|tmux]", "error");
+				return;
+			}
+			let existing: Record<string, unknown> = {};
+			try {
+				const parsed = JSON.parse(await readFile(settingsPath(), "utf8"));
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed;
+			} catch {
+				// Missing or unreadable: start fresh.
+			}
+			await writeJsonAtomic(settingsPath(), { ...existing, backend: requested });
+			const override = process.env[BACKEND_ENV]?.trim();
+			ctx.ui.notify(
+				`Subagent backend set to ${requested} for new runs.${override ? ` ${BACKEND_ENV}=${override} still overrides it in this process.` : ""}`,
+				override ? "warning" : "info",
+			);
 		},
 	});
 
@@ -1633,15 +1554,15 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	const availableProfileNames = allProfileNames.filter((name) => name.toLowerCase() !== WORKER_PROFILE);
 
 	const asyncTool = {
-		name: "herdr_async",
-		label: "Herdr Async",
-		description: `Dispatch one asynchronous delegated task using a named agent profile. Available profiles: ${allProfileNames.length ? allProfileNames.join(", ") : "(none)"}. Returns Herdr coordinates and a run id once the child is running, monitors it in the background, and automatically steers its bounded final result back into this session. Ordered model fallback applies. Profiles marked worktree run on their own Git branch. Async runs survive /reload and are cancelled when the parent session ends.`,
-		promptSnippet: "Dispatch a background Herdr subagent whose result returns automatically",
+		name: ASYNC_TOOL,
+		label: "Subagent Async",
+		description: `Dispatch one asynchronous delegated task using a named agent profile. Available profiles: ${allProfileNames.length ? allProfileNames.join(", ") : "(none)"}. Returns the run id and attach/capture commands once the child is running in a Herdr tab or tmux window, monitors it in the background, and automatically steers its bounded final result back into this session. Ordered model fallback applies. Profiles marked worktree run on their own Git branch. Async runs survive /reload and are cancelled when the parent session ends.`,
+		promptSnippet: "Dispatch a background subagent whose result returns automatically",
 		promptGuidelines: [
-			"Route every explicit &name agent reference through herdr_async, including &worker.",
-			"Use herdr_async when delegated work can run independently while the parent continues useful work.",
-			"Provide herdr_async a named agent profile and a complete, self-contained task.",
-			"Do not poll a herdr_async run; its completion or failure is automatically steered into the parent session.",
+			`Route every explicit &name agent reference through ${ASYNC_TOOL}, including &worker.`,
+			`Use ${ASYNC_TOOL} when delegated work can run independently while the parent continues useful work.`,
+			`Provide ${ASYNC_TOOL} a named agent profile and a complete, self-contained task.`,
+			`Do not poll a ${ASYNC_TOOL} run; its completion or failure is automatically steered into the parent session.`,
 		],
 		parameters: DelegatedTaskParams,
 
@@ -1662,13 +1583,14 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			const run = await startAsync(profile, params.task, sourceCwd, signal, ctx);
 			const details = run.details;
 			const text = [
-				`Async ${profile.name} dispatched in Herdr tab ${details.tabId}, pane ${details.paneId} (run ${shortId(run.record.id)}).`,
+				`Async ${profile.name} dispatched in ${details.target} (run ${shortId(run.record.id)}).`,
 				"Its completion or failure will be delivered automatically; do not poll it.",
 				`Attach: ${details.attachCommand}`,
 				`Capture: ${details.captureCommand}`,
 				...(run.record.worktree
 					? [`Worktree: ${run.record.worktree.path} (branch ${run.record.worktree.branch})`]
 					: []),
+				...(details.backend === "tmux" ? [TMUX_BLOCKED_NOTE] : []),
 			].join("\n");
 			return {
 				content: [{ type: "text" as const, text }],
@@ -1681,7 +1603,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			const firstLine = task.split("\n", 1)[0] ?? task;
 			const preview = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
 			return new Text(
-				theme.fg("toolTitle", theme.bold(`herdr async ${args.agent || "subagent"} `)) + theme.fg("dim", preview),
+				theme.fg("toolTitle", theme.bold(`subagent async ${args.agent || ""} `)) + theme.fg("dim", preview),
 				0,
 				0,
 			);
@@ -1704,15 +1626,15 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 	pi.registerTool(asyncTool as unknown as ToolDefinition<typeof DelegatedTaskParams>);
 
 	const blockingTool = {
-		name: "herdr_subagent",
-		label: "Herdr Subagent",
-		description: `Run one parent-selected blocking dependency in a separate Pi process using a named non-worker agent profile. Available blocking profiles: ${availableProfileNames.length ? availableProfileNames.join(", ") : "(none)"}. Use herdr_async for explicit &name references and for the worker profile. Profiles are refreshed at call time; sibling calls may run concurrently. Each child is visible and inspectable in Herdr while running, then its tab auto-closes after the result is collected; output is capped at 50KB or 2000 lines.`,
-		promptSnippet: "Run one blocking delegated task in an observable herdr pane",
+		name: BLOCKING_TOOL,
+		label: "Subagent",
+		description: `Run one parent-selected blocking dependency in a separate Pi process using a named non-worker agent profile. Available blocking profiles: ${availableProfileNames.length ? availableProfileNames.join(", ") : "(none)"}. Use ${ASYNC_TOOL} for explicit &name references and for the worker profile. Profiles are refreshed at call time; sibling calls may run concurrently. Each child is visible and inspectable in a Herdr tab or tmux window while running, then its target auto-closes after the result is collected; output is capped at 50KB or 2000 lines.`,
+		promptSnippet: "Run one blocking delegated task in an observable Herdr tab or tmux window",
 		promptGuidelines: [
-			"Use herdr_subagent only when the parent selects a blocking dependency and needs its result before continuing.",
-			"Provide herdr_subagent one non-worker profile and a complete, self-contained task; route explicit &name references through herdr_async instead.",
-			"Never pass worker to herdr_subagent; use herdr_async with the worker profile instead.",
-			"If a run reports that the child is blocked, attach with the printed herdr command and answer it rather than retrying the task.",
+			`Use ${BLOCKING_TOOL} only when the parent selects a blocking dependency and needs its result before continuing.`,
+			`Provide ${BLOCKING_TOOL} one non-worker profile and a complete, self-contained task; route explicit &name references through ${ASYNC_TOOL} instead.`,
+			`Never pass worker to ${BLOCKING_TOOL}; use ${ASYNC_TOOL} with the worker profile instead.`,
+			"If a run reports that the child is blocked, attach with the printed command and answer it rather than retrying the task.",
 		],
 		parameters: DelegatedTaskParams,
 
@@ -1726,7 +1648,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			if (!params.task.trim()) throw new Error("Subagent task must not be empty.");
 			if (params.agent.trim().toLowerCase() === WORKER_PROFILE) {
 				throw new Error(
-					"The worker profile is not available to blocking herdr_subagent. Use herdr_async with agent worker.",
+					`The worker profile is not available to blocking ${BLOCKING_TOOL}. Use ${ASYNC_TOOL} with agent worker.`,
 				);
 			}
 			const profile = await subagentProfiles.get(params.agent);
@@ -1741,6 +1663,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 				sourceCwd,
 				ctx,
 				signal: signal ?? new AbortController().signal,
+				controller: new AbortController(),
 				autoClose: process.env[EXIT_ON_FINISH_ENV] !== "0",
 				readPane: true,
 				onProgress: (progress) =>
@@ -1754,7 +1677,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 			const task = args.task?.trim() || "...";
 			const firstLine = task.split("\n", 1)[0] ?? task;
 			const preview = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
-			return new Text(theme.fg("toolTitle", theme.bold(`herdr ${args.agent || "subagent"} `)) + theme.fg("dim", preview), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold(`subagent ${args.agent || ""} `)) + theme.fg("dim", preview), 0, 0);
 		},
 
 		renderResult(result: any, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any) {
@@ -1774,12 +1697,12 @@ export default function herdrSubagentExtension(pi: ExtensionAPI): void {
 						? theme.fg("success", "✓")
 						: theme.fg("error", "✗");
 			const duration = formatDuration(details.startedAt, details.finishedAt);
-			const label = details.agentName || details.paneId || "subagent";
+			const label = details.agentName || "subagent";
 			let text = `${icon} ${theme.fg("toolTitle", theme.bold(label))}`;
 			const state = blocked ? "blocked · needs input" : details.status;
 			text += theme.fg("muted", ` · ${state}${duration ? ` · ${duration}` : ""}`);
 			text += details.autoClosed
-				? `\n  ${theme.fg("dim", "Herdr pane auto-closed")}`
+				? `\n  ${theme.fg("dim", `${details.backend} target auto-closed`)}`
 				: `\n  ${theme.fg("accent", details.attachCommand)}`;
 			text += `\n  ${theme.fg("dim", `${details.provider}/${details.model} (${details.thinking})`)}`;
 			if (details.worktree) text += `\n  ${theme.fg("dim", `branch ${details.worktree.branch}`)}`;

@@ -54,7 +54,7 @@ questions and error messages are stripped before terminal display.
 ```
 
 - `allow` names plugins (package name such as `pi-exa`, or a local extension's
-  file/directory name such as `herdr-subagent`) and/or built-in tools (`read`,
+  file/directory name such as `subagent`) and/or built-in tools (`read`,
   `grep`, `find`, `ls`, `bash`, `edit`, `write`). `/btw-plugins` toggles entries
   from the installed list. Unknown entries are kept.
 - With a non-empty allowlist, each side turn runs an in-memory side
