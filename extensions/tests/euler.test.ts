@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 
 const { default: euler } = await import("../euler.ts");
 
@@ -51,6 +51,19 @@ test("/e <task> turns Euler on for the branch and submits the task once; /euler 
 	assert.equal(await prompt(), undefined);
 	assert.equal(statuses.at(-1), undefined);
 	assert.equal(sent.length, 1, "on/off toggles submit nothing");
+});
+
+test("approved preferences from /corrections reach the Euler prompt", async () => {
+	const dir = join(getAgentDir(), "skills", "euler");
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "preferences.md"), "- UIs are utility-first; no editorial copy.\n");
+	try {
+		const { commands, ctx, prompt } = harness();
+		await commands.get("e").handler("", ctx);
+		assert.match((await prompt())!, /## User preferences\n\n- UIs are utility-first; no editorial copy\./);
+	} finally {
+		rmSync(join(dir, "preferences.md"));
+	}
 });
 
 test("Euler state follows the active session branch; abandoned branches do not leak into it", async () => {

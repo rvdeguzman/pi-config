@@ -6,15 +6,17 @@
  * Without a key, or if TypeSafe is unavailable, results stay lexical.
  */
 
-import { createReadStream, existsSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import * as path from "node:path";
 import { createInterface } from "node:readline";
 
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone";
+import { filesUnder, newestSessionFiles, textContent } from "./lib/session-files.ts";
+import { systemOne } from "./lib/typesafe.ts";
+
 const SESSION_LIMIT = 400;
 const NOTE_LIMIT = 300;
 const SHORTLIST = 24;
@@ -25,7 +27,6 @@ const MAX_NOTE_BYTES = 200_000;
 const STOP_WORDS = new Set(
 	"a an and are as at be but by can do does for from how i if in into is it its me my of on or our so that the this to u up was we what when where which who why will with you your".split(" "),
 );
-const IGNORED_DIRS = new Set([".git", ".repos", "node_modules", "dist", "build", "target", ".next", ".venv", "out"]);
 
 export interface RecallCandidate {
 	id: string;
@@ -56,51 +57,9 @@ function words(text: string): string[] {
 		.filter((word) => word.length > 1 && !STOP_WORDS.has(word)) ?? [];
 }
 
-function textContent(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter((block) => block && typeof block === "object" && (block as { type?: string }).type === "text")
-		.map((block) => String((block as { text?: unknown }).text ?? ""))
-		.join("\n");
-}
-
 function compact(text: string, limit = CHUNK_CHARS): string {
 	const clean = text.replace(/\n{3,}/g, "\n\n").trim();
 	return clean.length > limit ? `${clean.slice(0, limit - 1)}…` : clean;
-}
-
-async function filesUnder(root: string, accept: (file: string) => boolean, limit: number, depth = 5): Promise<string[]> {
-	const files: string[] = [];
-	const walk = async (dir: string, level: number): Promise<void> => {
-		if (files.length >= limit || level > depth) return;
-		let entries;
-		try {
-			entries = await readdir(dir, { withFileTypes: true });
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			if (files.length >= limit) return;
-			const file = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				if (!IGNORED_DIRS.has(entry.name)) await walk(file, level + 1);
-			} else if (entry.isFile() && accept(file)) {
-				files.push(file);
-			}
-		}
-	};
-	await walk(root, 0);
-	return files;
-}
-
-async function newestSessionFiles(root: string, exclude?: string): Promise<string[]> {
-	const files = await filesUnder(root, (file) => file.endsWith(".jsonl") && path.resolve(file) !== exclude, 10_000, 3);
-	const dated = await Promise.all(files.map(async (file) => ({ file, mtime: (await stat(file)).mtimeMs })));
-	return dated
-		.sort((a, b) => b.mtime - a.mtime)
-		.slice(0, SESSION_LIMIT)
-		.map((item) => item.file);
 }
 
 async function sessionChunks(file: string): Promise<Chunk[]> {
@@ -233,17 +192,10 @@ export async function rerankWithJev(
 			},
 		]),
 	);
-	const response = await fetchImpl(TYPESAFE_URL, {
-		method: "POST",
-		headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-		body: JSON.stringify({ model: "jev-latest", state, questions }),
-		signal: AbortSignal.timeout(20_000),
-	});
-	if (!response.ok) throw new Error(`TypeSafe returned HTTP ${response.status}.`);
-	const body = (await response.json()) as { answers?: Record<string, { noul?: unknown }> };
+	const answers = (await systemOne(state, questions, { apiKey, fetchImpl })) as Record<string, { noul?: unknown }>;
 	return candidates
 		.map((candidate) => {
-			const relevance = body.answers?.[candidate.id]?.noul;
+			const relevance = answers[candidate.id]?.noul;
 			if (typeof relevance !== "number" || !Number.isFinite(relevance)) throw new Error(`TypeSafe omitted ${candidate.id}.`);
 			return { ...candidate, relevance };
 		})
@@ -257,7 +209,10 @@ export async function recall(
 	const trimmed = query.trim();
 	if (!trimmed) throw new Error("Recall query must not be empty.");
 	const agentDir = options.agentDir ?? getAgentDir();
-	const sessions = await newestSessionFiles(path.join(agentDir, "sessions"), options.currentSessionFile && path.resolve(options.currentSessionFile));
+	const sessions = await newestSessionFiles(path.join(agentDir, "sessions"), {
+		exclude: options.currentSessionFile,
+		limit: SESSION_LIMIT,
+	});
 	const chunks = [
 		...(await Promise.all(sessions.map((file) => sessionChunks(file).catch(() => [])))).flat(),
 		...(await noteChunks(options.cwd, agentDir)),

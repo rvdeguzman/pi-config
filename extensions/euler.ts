@@ -9,11 +9,11 @@
  * affect the active one.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { stripFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, stripFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const ENTRY_TYPE = "euler";
 const STATUS_KEY = "euler";
@@ -58,7 +58,11 @@ export default function euler(pi: ExtensionAPI): void {
 		if (!active(ctx)) return;
 		// Read per run so edits to SKILL.md apply without /reload.
 		const body = stripFrontmatter(readFileSync(SKILL_PATH, "utf8")).trim();
-		event.systemPromptOptions.sections[SECTION] = `${body}\n\nPlaybook directory: ${PLAYBOOK_DIR}`;
+		// Approved rules from /corrections; follows the agent dir so tests stay isolated.
+		const preferencesPath = join(getAgentDir(), "skills", "euler", "preferences.md");
+		const preferences = existsSync(preferencesPath) ? readFileSync(preferencesPath, "utf8").trim() : "";
+		event.systemPromptOptions.sections[SECTION] =
+			`${body}\n\nPlaybook directory: ${PLAYBOOK_DIR}` + (preferences ? `\n\n## User preferences\n\n${preferences}` : "");
 	});
 
 	const handler = async (args: string, ctx: ExtensionContext) => {

@@ -167,6 +167,30 @@ Verify without network requests:
 make -C extensions/tests test-recall
 ```
 
+## Correction capture
+
+`/corrections` turns feedback you keep repeating into approved rules.
+
+1. It collects your replies to agent messages from recent sessions (since the last
+   run, or 14 days the first time). Injected skills, slash commands, and long pastes
+   are skipped.
+2. Jev judges each reply: is it a correction, and is it global, project-specific,
+   or a one-off?
+3. The flagged evidence goes to the current agent, which groups it into rules and
+   asks you to approve each one with the question UI. Nothing is written without
+   approval.
+4. Global rules go to `skills/euler/preferences.md`, which Euler adds to its
+   prompt. Project rules go under `## Preferences` in that project's `AGENTS.md`.
+
+Reviewed messages are remembered in ignored `corrections-state.json`, so the next
+run sees only new ones. `/corrections 30` re-reviews the last 30 days. Requires
+`TYPESAFE_API_KEY`; reviewed messages and the agent replies they answer are sent to
+TypeSafe.
+
+```sh
+make -C extensions/tests test-corrections
+```
+
 ## Verify bootstrap behavior
 
 ```sh
