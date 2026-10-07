@@ -388,6 +388,21 @@ test("async runs survive /reload: the next extension instance re-attaches and de
 	await second.handlers.get("session_shutdown")?.({ reason: "quit" }, second.ctx);
 });
 
+test("reattachment does not close a reused Herdr pane hosting another agent", async () => {
+	const herdr = createFakeHerdr({ onPrompt: () => undefined });
+	const sessionId = `reuse-${Date.now()}`;
+	const first = harness(herdr, { sessionId });
+	await first.tools.get("subagent_async").execute("reuse", { agent: "scout", task: "keep going" }, undefined, undefined, first.ctx);
+	await first.handlers.get("session_shutdown")?.({ reason: "reload" }, first.ctx);
+	herdr.launches[0]!.name = "someone-else";
+
+	const second = harness(herdr, { sessionId });
+	await second.handlers.get("session_start")?.({ reason: "reload" }, second.ctx);
+	await waitFor(() => second.messages.length === 1);
+	assert.deepEqual(herdr.closedTabs, []);
+	await second.handlers.get("session_shutdown")?.({ reason: "quit" }, second.ctx);
+});
+
 test("quitting cancels async children and closes their tabs", async () => {
 	const herdr = createFakeHerdr({ onPrompt: () => undefined });
 	const { tools, messages, ctx, handlers } = harness(herdr);

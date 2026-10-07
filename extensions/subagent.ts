@@ -216,7 +216,12 @@ function backendNameOf(record: RunRecord): BackendName {
 function handleOf(record: RunRecord): BackendHandle | undefined {
 	if (record.handle) return record.handle;
 	if (!record.tabId && !record.paneId) return undefined;
-	return { workspaceId: record.workspaceId ?? "", tabId: record.tabId ?? "", paneId: record.paneId ?? "" };
+	return {
+		workspaceId: record.workspaceId ?? "",
+		tabId: record.tabId ?? "",
+		paneId: record.paneId ?? "",
+		agent: record.agentName ?? "",
+	};
 }
 
 class NonRetryableSubagentError extends Error {}
@@ -1000,14 +1005,18 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	};
 
 	/** Close one target through its run's backend; true once it is known to be gone. Idempotent. */
+	const closedTargets = new Set<string>();
 	const closeTarget = async (
 		backend: SubagentBackend,
 		handle: BackendHandle | undefined,
 		options?: { verify?: boolean },
 	): Promise<boolean> => {
 		if (!handle) return true;
+		const key = `${backend.name}:${JSON.stringify(handle)}`;
+		if (closedTargets.has(key)) return true;
 		try {
 			await backend.close(handle, options);
+			closedTargets.add(key);
 			return true;
 		} catch {
 			return false;
@@ -1026,7 +1035,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const settle = async (
 		record: RunRecord,
 		outcome: { result?: ChildResult; error?: string; progress: MonitorProgress },
-		options: { autoClose: boolean },
+		options: { autoClose: boolean; verifyClose?: boolean },
 	): Promise<RunDetails> => {
 		const backend = backendFor(record);
 		const result = outcome.result;
@@ -1041,11 +1050,13 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				if (inspected.dirty) {
 					worktree = { ...inspected, state: "retained", note: "Uncommitted changes; checkout and tab retained for inspection." };
 				} else {
-					autoClosed = await closeTarget(backend, handleOf(record));
-					worktree = await releaseWorktree(pi, worktree);
+					autoClosed = await closeTarget(backend, handleOf(record), { verify: options.verifyClose });
+					worktree = autoClosed
+						? await releaseWorktree(pi, worktree)
+						: { ...inspected, state: "retained", note: "Child target could not be confirmed closed; checkout retained." };
 				}
 			} else {
-				autoClosed = await closeTarget(backend, handleOf(record));
+				autoClosed = await closeTarget(backend, handleOf(record), { verify: options.verifyClose });
 			}
 		} else if (worktree && liveWorktree) {
 			worktree = { ...(await inspectWorktree(pi, worktree)), state: "active" };
@@ -1092,7 +1103,18 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * settle it. Shared by blocking and async runs. Errors before the first
 	 * successful launch propagate; later failures resolve as failed details.
 	 */
-	const executeRun = async (options: ExecuteOptions): Promise<{ details: RunDetails; record: RunRecord }> => {
+	const runJobs = new Set<Promise<unknown>>();
+	const executeRun = (options: ExecuteOptions): Promise<{ details: RunDetails; record: RunRecord }> => {
+		const job = executeRunNow(options);
+		runJobs.add(job);
+		void job.then(
+			() => runJobs.delete(job),
+			() => runJobs.delete(job),
+		);
+		return job;
+	};
+
+	const executeRunNow = async (options: ExecuteOptions): Promise<{ details: RunDetails; record: RunRecord }> => {
 		const { profile, ctx } = options;
 		const thinking = profile.thinking ?? pi.getThinkingLevel();
 		const childTools = resolveChildTools(pi, profile.tools ?? pi.getActiveTools(), profile.name);
@@ -1240,7 +1262,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				} catch (error) {
 					if (signal.aborted) {
 						// Session shutdown closes its own targets; a reload keeps async ones running.
-						if (!live.detached && !shuttingDown) await closeTarget(backend, record.handle);
+						if (!live.detached) await closeTarget(backend, record.handle);
 						throw error;
 					}
 					failure = error instanceof Error ? error : new Error(String(error));
@@ -1352,7 +1374,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	/** Close the target and release the checkout of a run whose owner died mid-flight (crash during launch or a blocking call). */
 	const cleanUpInterrupted = async (record: RunRecord): Promise<void> => {
 		// Target ids may have been reused since the crash: close only what is provably this run's.
-		await closeTarget(backendFor(record), handleOf(record), { verify: true });
+		if (!(await closeTarget(backendFor(record), handleOf(record), { verify: true }))) return;
 		if (record.worktree) record.worktree = await releaseWorktree(pi, record.worktree);
 		record.status = "cancelled";
 		record.delivered = true;
@@ -1395,13 +1417,17 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 							updateAsyncWidget(currentCtx);
 						},
 					});
-					details = await settle(record, { result: monitored.result, progress: monitored.progress }, { autoClose: true });
+					details = await settle(
+						record,
+						{ result: monitored.result, progress: monitored.progress },
+						{ autoClose: true, verifyClose: true },
+					);
 				} catch (error) {
 					if (run.controller.signal.aborted) return;
 					details = await settle(
 						record,
 						{ error: error instanceof Error ? error.message : String(error), progress: {} },
-						{ autoClose: true },
+						{ autoClose: true, verifyClose: true },
 					);
 				} finally {
 					if (!run.detached) liveRuns.delete(record.id);
@@ -1458,10 +1484,11 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			run.record.finishedAt = Date.now();
 			await saveRecord(run.record);
 			const backend = backendFor(run.record);
-			closes.push(closeTarget(backend, run.record.handle), ...run.pending.splice(0).map((handle) => closeTarget(backend, handle)));
+			closes.push(closeTarget(backend, handleOf(run.record)), ...run.pending.splice(0).map((handle) => closeTarget(backend, handle)));
 		}
 		liveRuns.clear();
-		await Promise.allSettled(closes);
+		// Let in-flight launches persist and close targets created after cancellation before runtime invalidation.
+		await Promise.allSettled([...closes, ...runJobs]);
 		if (ctx?.hasUI) ctx.ui.setWidget(ASYNC_WIDGET_ID, undefined);
 	});
 

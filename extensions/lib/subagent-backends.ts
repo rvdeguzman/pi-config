@@ -360,7 +360,7 @@ export class HerdrBackend implements SubagentBackend {
 					"--",
 					...request.piArgs,
 				],
-				{ timeout: START_TIMEOUT_MS + 10_000, signal: startAbort.signal },
+				{ timeout: START_TIMEOUT_MS + 10_000, signal: request.signal ? AbortSignal.any([startAbort.signal, request.signal]) : startAbort.signal },
 			);
 			if (exitedEarly) throw new Error("Pi exited during startup.");
 			started = true;
@@ -418,7 +418,19 @@ export class HerdrBackend implements SubagentBackend {
 	async close(handle: BackendHandle, options: { verify?: boolean } = {}): Promise<"closed" | "already_gone"> {
 		if (!handle.tabId) return "already_gone";
 		// Herdr can only prove ownership while the named agent still runs in the pane.
-		if (options.verify && (!handle.agent || typeof (await this.probe(handle)) !== "object")) return "already_gone";
+		if (options.verify) {
+			if (!handle.agent) throw new Error("Herdr target ownership is unknown.");
+			let pane: unknown;
+			try {
+				pane = pick(await herdrJson(this.pi, ["pane", "get", handle.paneId ?? ""], { timeout: 10_000 }), "pane");
+			} catch (error) {
+				if (error instanceof HerdrError && error.code === "pane_not_found") return "already_gone";
+				throw error;
+			}
+			// Pane ids are not reused. A finished child leaves its shell; another agent in the pane is not ours.
+			if (pickString(pane, "tab_id") !== handle.tabId) return "already_gone";
+			if (pick(pane, "agent") && pickString(pane, "agent_name") !== handle.agent) return "already_gone";
+		}
 		try {
 			await herdrOk(this.pi, ["tab", "close", handle.tabId], { timeout: 10_000 });
 			return "closed";

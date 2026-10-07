@@ -15,6 +15,7 @@ export interface FakeLaunch {
 	argv?: string[];
 	prompt?: string;
 	exited: boolean;
+	closed?: boolean;
 	status: "idle" | "working" | "blocked" | "done";
 	keys: string[];
 }
@@ -124,7 +125,10 @@ export function createFakeHerdr(options: FakeHerdrOptions = {}): FakeHerdr {
 			if (group === "tab" && action === "close") {
 				closedTabs.push(args[2] ?? "");
 				const launch = launches.find((candidate) => candidate.tabId === args[2]);
-				if (launch) launch.exited = true;
+				if (launch) {
+					launch.exited = true;
+					launch.closed = true;
+				}
 				return ok({ type: "ok" });
 			}
 			if (group === "worktree" && action === "create") {
@@ -173,7 +177,7 @@ export function createFakeHerdr(options: FakeHerdrOptions = {}): FakeHerdr {
 			if (group === "agent" && action === "get") {
 				const launch = byPane(args[2]!);
 				if (!launch || launch.exited || !launch.name) return fail("agent_not_found", `agent target ${args[2]} not found`);
-				return ok({ agent: { pane_id: launch.paneId, agent_status: launch.status } });
+				return ok({ agent: { pane_id: launch.paneId, name: launch.name, agent_status: launch.status } });
 			}
 			if (group === "agent" && action === "send-keys") {
 				const launch = byPane(args[2]!);
@@ -182,6 +186,18 @@ export function createFakeHerdr(options: FakeHerdrOptions = {}): FakeHerdr {
 				launch.keys.push(...keys);
 				await options.onKeys?.(launch, keys, herdr);
 				return ok({ type: "ok" });
+			}
+			if (group === "pane" && action === "get") {
+				const launch = launches.find((candidate) => candidate.paneId === args[2]);
+				if (!launch || launch.closed) return fail("pane_not_found");
+				return ok({
+					pane: {
+						pane_id: launch.paneId,
+						tab_id: launch.tabId,
+						agent: launch.exited || !launch.name ? null : "pi",
+						agent_name: launch.exited ? null : launch.name,
+					},
+				});
 			}
 			if (group === "pane" && action === "read") {
 				const launch = byPane(args[2]!);
