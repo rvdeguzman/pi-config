@@ -5,7 +5,7 @@ export PI_TEST_ENTRY
 
 .DEFAULT_GOAL := test
 
-.PHONY: test test-extensions test-ask test-btw test-subagents test-euler smoke
+.PHONY: test test-extensions test-ask test-btw test-subagents test-euler test-recall smoke
 
 test: test-extensions
 
@@ -24,6 +24,9 @@ test-subagents:
 
 test-euler:
 	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/euler.test.ts
+
+test-recall:
+	cd ../.. && $(NODE) $(NODE_TYPE_FLAGS) --import ./extensions/tests/register-pi.mjs --test extensions/tests/recall.test.ts
 
 smoke:
 	cd ../.. && PI_OFFLINE=1 $(NODE) --import ./extensions/tests/register-pi.mjs ./extensions/tests/smoke.mjs

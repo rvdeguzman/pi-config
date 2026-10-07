@@ -149,6 +149,24 @@ make -C extensions/tests test-subagents
 make -C extensions/tests test-euler
 ```
 
+## Recall
+
+`/recall <query>` searches recent Pi sessions plus local Markdown notes for prior
+decisions, constraints, and implementation history. The model can use the same
+`recall` tool when resuming work.
+
+Search runs locally first. If `TYPESAFE_API_KEY` is set, the top 24 matching
+snippets are sent to TypeSafe and reranked by Jev with one yes/no relevance
+judgment each. Without a key, or if TypeSafe fails, recall returns local lexical
+matches. The current session, subagent sessions, tool output, and thinking are not
+searched.
+
+Verify without network requests:
+
+```sh
+make -C extensions/tests test-recall
+```
+
 ## Verify bootstrap behavior
 
 ```sh
