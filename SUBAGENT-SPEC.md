@@ -45,7 +45,9 @@ tools: [read, grep, find, ls]
 ```yaml
 ---
 name: worker
-model: anthropic/claude-opus-5.5
+model:
+  - openai/gpt-6.1-sol
+  - anthropic/claude-opus-5-5
 thinking: high
 worktree: true
 ---
@@ -198,6 +200,15 @@ When profiles are available, add concise guidance to the parent system prompt as
 - Use `subagent` only for a parent-selected blocking dependency.
 - Do not add model, thinking, or tool overrides; the profile owns those settings.
 - The number and ordering of child calls remain the parent's decision unless the user explicitly requests particular references or parallelism.
+- Merging a finished child branch into the current local branch is part of integration; pushing is not.
+
+The section also says when to delegate, naming only profiles that exist (`scout*`, `researcher*`, `reviewer*`, worktree profiles). The rules come from an audit of real sessions: exploration and web research filled most of the parent's context, taste corrections dominated user messages, and unrequested verification fan-out was the main friction.
+
+- Gather context first: exploring unfamiliar code goes to a scout, web or docs research to a researcher.
+- Taste-sensitive or tightly coupled work stays in the parent. Worktree profiles get well-specified work only; read-only surveys never go to them.
+- Parallel children own disjoint files. The parent first commits the shared contract (types, interfaces, stubs, registry or config entries), since children branch from committed HEAD; each task names owned files and shared files not to edit. Slices that cannot be made disjoint run in sequence. Branches are integrated one at a time with the project's check after each merge.
+- One reviewer per integrated change, over the diff, flagging tests that would not catch a plausible bug and waits without a time limit.
+- Verification stays proportional to risk: sample by category; no unrequested screenshot sweeps, process fan-outs, or extra reviewers.
 
 ## Execution backends
 
@@ -233,7 +244,7 @@ The child writes an atomic result file on `agent_settled`; that file is the only
 When the profile sets `worktree: true` and the working directory is inside a Git repository with at least one commit:
 
 1. A checkout on branch `pi/<profile>-<run8>` is created from the source repository's committed `HEAD`. Herdr: `herdr worktree create` opens it as a workspace; the child tab is created there and the workspace's root tab is closed once the child tab exists. tmux: `git worktree add` under `~/.pi/agent/subagent-worktrees/` (never pruned automatically). The child's cwd keeps the caller's relative subdirectory.
-2. A short note is appended to the task: the checkout path, branch, and base commit; that uncommitted parent changes are absent; and that the child must commit on the branch and must not merge, rebase, push, or switch branches.
+2. A short note is appended to the task: the checkout path, branch, and base commit; that uncommitted parent changes are absent; and that the child must commit on the branch and must not merge, rebase, push, or switch branches; and that siblings may run in parallel, so it edits only its assigned files and uses run-unique ports and temp paths.
 3. After the run, the parent inspects the checkout (commits since base, diffstat, uncommitted changes):
    - Uncommitted changes: the checkout and its target are retained and reported.
    - Clean with commits: the target closes, the checkout is removed with `git worktree remove` (never forced), and the branch is kept and reported with an integration hint.
@@ -246,6 +257,10 @@ Outside a Git repository, the run proceeds in place and the result says so. Para
 
 - `subagent`: launch, monitor, settle, and return the bounded result. Progress updates include the attach and capture commands. Any final failure other than cancellation moves to the next model candidate in a fresh target on the same backend, without adding same-model retries.
 - `subagent_async`: return the run id and attach/capture commands once the first child is running. A session-scoped monitor tracks it in the parent widget, auto-closes the target, and injects a visible `subagent-async-result` custom message with `deliverAs: "steer"` and `triggerTurn: true`.
+
+## Unintegrated work
+
+`/subagent-branches` lists finished work that has not reached a repository's HEAD: every `refs/heads/pi/*` branch, in repositories known from run records, with commits that `git cherry` reports as missing (so merged and cherry-picked work is excluded), plus checkouts retained with uncommitted changes. Runs still queued or running are skipped. At startup the same check runs for the current repository and posts a one-line notice when anything is found. Repositories whose run records have all been pruned are no longer checked.
 
 ## Run records and retention
 

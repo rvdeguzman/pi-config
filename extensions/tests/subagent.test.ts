@@ -33,7 +33,7 @@ after(async () => {
 	await rm(agentDir, { recursive: true, force: true });
 });
 
-const { default: extensionImpl, isRunDetails, pruneRunDirs, resolveChildTools, resultText } = await import(
+const { default: extensionImpl, findUnintegratedWork, isRunDetails, pruneRunDirs, resolveChildTools, resultText, unintegratedText } = await import(
 	"../subagent.ts"
 );
 const { herdrOk } = await import("../lib/subagent-backends.ts");
@@ -694,5 +694,61 @@ test("auto uses Herdr only inside a Herdr pane, then tmux; explicit backends fai
 		await assert.rejects(configuredBackend({ PI_SUBAGENT_BACKEND: "screen" }), /Invalid subagent backend/);
 	} finally {
 		await rm(join(agentDir, "subagents.json"));
+	}
+});
+
+// Protects: finished worker branches that never reached HEAD are surfaced instead of silently left behind.
+// Catches: listing merged or cherry-picked work (merge-base alone misses cherry-picks), or a run still in flight.
+test("unintegrated work lists only pi/* commits missing from HEAD and retained checkouts", async () => {
+	const repo = await mkdtemp(join(tmpdir(), "subagent-unintegrated-"));
+	const g = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+	const commitOn = (branch: string, file: string) => {
+		g("switch", "-q", "-c", branch, "main");
+		execFileSync("sh", ["-c", `echo ${file} > ${file}`], { cwd: repo });
+		g("add", file);
+		g("commit", "-qm", `add ${file}`);
+		const sha = g("rev-parse", "HEAD");
+		g("switch", "-q", "main");
+		return sha;
+	};
+	try {
+		g("init", "-q", "-b", "main");
+		g("config", "user.email", "t@t");
+		g("config", "user.name", "t");
+		g("commit", "-q", "--allow-empty", "-m", "base");
+		commitOn("pi/worker-merged", "a");
+		const picked = commitOn("pi/worker-picked", "b");
+		commitOn("pi/worker-open", "c");
+		commitOn("pi/worker-live", "d");
+		commitOn("feature/not-a-subagent", "e");
+		g("merge", "-q", "--no-ff", "-m", "merge", "pi/worker-merged");
+		g("cherry-pick", picked);
+
+		const retained = await mkdtemp(join(tmpdir(), "subagent-retained-"));
+		const record = (branch: string, status: string, extra: Record<string, unknown> = {}) =>
+			({ status, worktree: { repoRoot: repo, branch, path: join(repo, "gone"), base: "x", state: "removed", ...extra } }) as any;
+		const records = [
+			record("pi/worker-open", "completed"),
+			record("pi/worker-live", "running"),
+			record("pi/worker-dirty", "completed", { state: "retained", path: retained }),
+			record("pi/worker-deleted", "completed", { state: "retained" }),
+		];
+		const pi = { exec: async (cmd: string, args: string[]) => {
+			try {
+				return { code: 0, stdout: execFileSync(cmd, args, { encoding: "utf8" }), stderr: "" };
+			} catch (error: any) {
+				return { code: error.status ?? 1, stdout: "", stderr: String(error.stderr ?? "") };
+			}
+		} } as any;
+
+		const work = await findUnintegratedWork(pi, records);
+		assert.deepEqual(work.branches.map((item: any) => [item.branch, item.commits.length]), [["pi/worker-open", 1]]);
+		assert.match(work.branches[0].commits[0], /^[0-9a-f]{7} add c$/);
+		assert.deepEqual(work.checkouts.map((item: any) => item.path), [retained]);
+		assert.match(unintegratedText(work), /pi\/worker-open: 1 commit not in HEAD/);
+		assert.deepEqual(await findUnintegratedWork(pi, records, { repoRoot: "/elsewhere" }), { branches: [], checkouts: [] });
+		await rm(retained, { recursive: true, force: true });
+	} finally {
+		await rm(repo, { recursive: true, force: true });
 	}
 });

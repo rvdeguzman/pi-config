@@ -161,7 +161,18 @@ exact attach/capture/close commands.
   `subagents.json`); `PI_SUBAGENT_BACKEND` overrides it per process. Changes
   affect new runs only.
 - `/subagent-prune [days]` removes old run directories.
+- `/subagent-branches` lists `pi/*` branches with commits not in HEAD and
+  checkouts retained with uncommitted changes. Startup notes any in the current
+  repository.
+- The parent prompt's `agent_profiles` section says when to delegate: scout and
+  researcher gather context, taste-sensitive work stays in the parent, workers
+  get well-specified slices that own disjoint files, one reviewer per
+  integrated change.
 - tmux cannot see whether a child is waiting for input; attach if it stalls.
+
+Model-issued `bash` calls without a `timeout` get 600 s (`extensions/bash-timeout.ts`;
+`PI_BASH_DEFAULT_TIMEOUT` sets seconds, `0` disables), so a hung test cannot hold
+a session or an unwatched child forever.
 
 Details are in [SUBAGENT-SPEC.md](SUBAGENT-SPEC.md). Verify without model
 requests (the tmux tests use an isolated tmux server and a stub `pi`):

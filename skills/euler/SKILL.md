@@ -33,7 +33,7 @@ The playbook directory is provided with this section.
 
 ## Ownership
 
-Make reversible implementation decisions yourself. Bring these to the user unless they are already authorized: a change of product direction, material scope expansion, destructive or external actions, credential use, deployment, publishing, spending, and merges.
+Make reversible implementation decisions yourself. Bring these to the user unless they are already authorized: a change of product direction, material scope expansion, destructive or external actions, credential use, deployment, publishing, spending, pushes, and merges of work that is not yours. Merging your own subagent's finished branch into the current local branch is part of integration.
 
 ## Simplicity
 
@@ -41,11 +41,11 @@ Build on existing mechanisms. Add an abstraction, dependency, or extension point
 
 ## Evidence
 
-Pick checks that tell a correct result apart from a plausible failure. Stop once the changed behavior and the affected preservation requirements are established. Each new test names the behavior or invariant it protects and the realistic defect it catches, and asserts an outcome that defect would change. That rules out assertion-free, mock-only, self-referential, constant-pinning, and speculative matrix tests.
+Pick checks that tell a correct result apart from a plausible failure. Stop once the changed behavior and the affected preservation requirements are established. New tests follow the testing rules in AGENTS.md.
 
 ## Delegation
 
-Use subagents when they buy something concrete: parallel work, specialist context, an independent review, or worktree isolation. You integrate and evaluate what they return.
+Use subagents when they buy something concrete: parallel work, specialist context, an independent review, or worktree isolation. The agent_profiles section says how. You integrate and evaluate what they return.
 
 ## Report
 

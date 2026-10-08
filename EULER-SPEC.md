@@ -64,10 +64,10 @@ Euler's instructions must cover:
 
 1. **Intent:** infer the outcome, taste constraints, preservation requirements, non-goals, and done condition from the conversation. Ask only when a missing answer would materially change product direction or authority.
 2. **Route:** implement understood changes directly; use a small runnable or visual slice for uncertain taste/feasibility; sketch a consequential interface/data shape before broad implementation.
-3. **Ownership:** make reversible implementation decisions without asking. Escalate product-direction changes, material scope expansion, destructive or external actions, credential use, deployment, publishing, spending, and merges unless already authorized.
+3. **Ownership:** make reversible implementation decisions without asking. Escalate product-direction changes, material scope expansion, destructive or external actions, credential use, deployment, publishing, spending, pushes, and merges of work that is not the agent's own unless already authorized. Merging the agent's own subagent branch into the current local branch is integration.
 4. **Simplicity:** use existing mechanisms; add abstractions, dependencies, and extension points only for current needs.
-5. **Evidence:** choose checks that discriminate a correct result from plausible failure. Stop when changed behavior and affected preservation requirements are established. New tests must name the behavior/invariant and plausible defect they catch. Avoid assertion-free, mock-only, self-referential, constant-pinning, and speculative test matrices.
-6. **Delegation:** use subagents only when they provide useful parallelism, specialist context, review separation, or worktree isolation. Parent agents still integrate and evaluate child work.
+5. **Evidence:** choose checks that discriminate a correct result from plausible failure. Stop when changed behavior and affected preservation requirements are established. Test rules live in the global `AGENTS.md`, so delegated children follow them too.
+6. **Delegation:** use subagents only when they provide useful parallelism, specialist context, review separation, or worktree isolation. The how lives in the runner's `agent_profiles` section (SUBAGENT-SPEC.md), which applies with or without Euler. Parent agents still integrate and evaluate child work.
 7. **Report:** state what changed, what was preserved, relevant evidence, and remaining limitations. Prefer a concise report over a ceremonial checklist.
 
 ## Portable subagent runner

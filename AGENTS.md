@@ -17,3 +17,10 @@ Use `make <target>` for common tasks (test, lint, build, run) when a project has
 
 - Makefile is the default: it's preinstalled everywhere, no new dependency.
 
+
+## Tests and verification
+
+- Add a test only when you can name the behavior or invariant it protects and a realistic bug it would catch, and it asserts an outcome that bug would change. No assertion-free, mock-only, self-referential, or constant-pinning tests, and no speculative edge-case matrices.
+- Prefer one discriminating check over broad coverage. Sample by category instead of exercising every item. Take screenshots or fan out processes only when the change is visual or the user asked.
+- Anything that waits on a process, socket, file, or child has a time limit. A test that can hang is broken.
+- Run long suites and builds with an explicit `timeout`, or in the background with polling.

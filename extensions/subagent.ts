@@ -328,6 +328,7 @@ function worktreeNote(info: WorktreeInfo): string {
 		`Isolated checkout: you are working in a dedicated Git worktree at ${info.path} on branch ${info.branch}, created from commit ${info.base.slice(0, 12)} of ${info.repoRoot}.`,
 		"The parent's uncommitted changes are not present here. Commit your finished changes on this branch before your final answer.",
 		"Do not merge, rebase, push, or switch branches; the parent integrates the branch. Report the commit(s) you made.",
+		"Sibling agents may be working in parallel: edit only the files your task assigns you, and use ports and temp paths unique to this run.",
 	].join("\n");
 }
 
@@ -873,6 +874,128 @@ async function loadSessionRecords(parentSessionId: string): Promise<RunRecord[]>
 		}
 	}
 	return records;
+}
+
+/**
+ * Parent guidance for when and how to delegate. Role lines name only profiles
+ * that exist (scout*, researcher*, reviewer*, and worktree profiles).
+ */
+export function delegationGuidance(profiles: Array<{ name: string; worktree: boolean }>): string {
+	const named = (prefix: string) => profiles.filter((profile) => profile.name.toLowerCase().startsWith(prefix)).map((profile) => profile.name);
+	const list = (names: string[]) => names.join(" or ");
+	const scouts = named("scout");
+	const researchers = named("researcher");
+	const reviewers = named("reviewer");
+	const isolated = profiles.filter((profile) => profile.worktree).map((profile) => profile.name);
+	const lines = [
+		`A valid &name reference is the user's explicit request to delegate asynchronously with that profile. Route every valid &name through ${ASYNC_TOOL}, including &worker. Compose a complete, self-contained task for every child. Do not add model, thinking, or tool overrides; the profile owns them. The caller controls the number and ordering of calls unless the user explicitly requests references or parallelism. Use ${BLOCKING_TOOL} only for a parent-selected blocking dependency.`,
+	];
+	if (isolated.length) {
+		lines.push(
+			`${isolated.length === 1 ? "Profile" : "Profiles"} ${isolated.join(", ")} ${isolated.length === 1 ? "runs" : "run"} in isolated Git worktrees on their own branch and do not see uncommitted parent changes; review the reported commits, then integrate the branch yourself. Merging a finished child branch into the current local branch is part of integration; pushing is not.`,
+		);
+	}
+	lines.push("When to delegate:");
+	if (scouts.length || researchers.length) {
+		const who = [scouts.length ? `exploration of unfamiliar code to ${list(scouts)}` : "", researchers.length ? `web or docs research to ${list(researchers)}` : ""].filter(Boolean).join(" and ");
+		lines.push(`- Gather context before building: send ${who}, and continue from their brief instead of reading everything yourself.`);
+	}
+	lines.push("- Implement taste-sensitive or tightly coupled work yourself, in this session.");
+	if (isolated.length) {
+		lines.push(
+			`- Give ${list(isolated)} only well-specified work that does not need the user's taste. Read-only surveys never go to a worktree profile.`,
+			"- Parallel children: split only into slices that own disjoint files. First commit the shared contract the slices depend on (types, interfaces, stubs, registry or config entries), because children branch from committed HEAD. Each task names the files the child owns and the shared files it must not edit. If the slices cannot be made disjoint, run them in sequence.",
+			"- Integrate one branch at a time and run the project's check after each merge.",
+		);
+	}
+	if (reviewers.length) {
+		lines.push(
+			`- Review once per integrated change with ${list(reviewers)}, over the diff, not after every step. Ask it to flag tests that would not catch a plausible bug and anything that can wait without a time limit.`,
+		);
+	}
+	lines.push(
+		"- Keep verification proportional to risk: sample by category instead of covering every item, and do not start screenshot sweeps, process fan-outs, or extra reviewers the user did not ask for.",
+	);
+	return lines.join("\n");
+}
+
+async function loadAllRecords(): Promise<RunRecord[]> {
+	let sessions: string[];
+	try {
+		sessions = await readdir(path.join(getAgentDir(), RUNS_DIR));
+	} catch {
+		return [];
+	}
+	const records: RunRecord[] = [];
+	for (const session of sessions) records.push(...(await loadSessionRecords(session)));
+	return records;
+}
+
+export interface UnintegratedWork {
+	/** pi/* branches with commits that are neither merged nor cherry-picked into the repository's HEAD. */
+	branches: Array<{ repoRoot: string; branch: string; commits: string[] }>;
+	/** Checkouts kept after a run because they had uncommitted changes. */
+	checkouts: Array<{ repoRoot: string; branch: string; path: string }>;
+}
+
+/**
+ * Finished subagent work that has not reached the repository's HEAD. Repositories
+ * come from run records, then every refs/heads/pi/* branch in them is checked with
+ * `git cherry`, so cherry-picked commits count as integrated. Runs still in flight
+ * are skipped.
+ */
+export async function findUnintegratedWork(
+	pi: ExtensionAPI,
+	records: RunRecord[],
+	options: { repoRoot?: string } = {},
+): Promise<UnintegratedWork> {
+	const inFlight = (record: RunRecord) => record.status === "queued" || record.status === "running";
+	const liveBranches = new Set(records.filter(inFlight).map((record) => record.worktree?.branch));
+	const repos = new Set(
+		records
+			.map((record) => record.worktree?.repoRoot)
+			.filter((repo): repo is string => !!repo && (!options.repoRoot || repo === options.repoRoot) && existsSync(repo)),
+	);
+	const work: UnintegratedWork = { branches: [], checkouts: [] };
+	for (const repoRoot of [...repos].sort()) {
+		const refs = await git(pi, repoRoot, ["for-each-ref", "--format=%(refname:short)", "refs/heads/pi/"]);
+		if (!refs.ok || !refs.out) continue;
+		for (const branch of refs.out.split("\n")) {
+			if (liveBranches.has(branch)) continue;
+			const cherry = await git(pi, repoRoot, ["cherry", "-v", "HEAD", branch]);
+			if (!cherry.ok) continue;
+			const commits = cherry.out
+				.split("\n")
+				.filter((line) => line.startsWith("+ "))
+				.map((line) => line.slice(2).replace(/^([0-9a-f]{7})[0-9a-f]*/, "$1"));
+			if (commits.length) work.branches.push({ repoRoot, branch, commits });
+		}
+	}
+	for (const record of records) {
+		const info = record.worktree;
+		if (!info || info.state !== "retained" || inFlight(record) || !existsSync(info.path)) continue;
+		if (options.repoRoot && info.repoRoot !== options.repoRoot) continue;
+		work.checkouts.push({ repoRoot: info.repoRoot, branch: info.branch, path: info.path });
+	}
+	return work;
+}
+
+export function unintegratedText(work: UnintegratedWork): string {
+	if (!work.branches.length && !work.checkouts.length) return "No unmerged subagent branches or retained checkouts.";
+	const lines: string[] = [];
+	for (const repoRoot of [...new Set([...work.branches, ...work.checkouts].map((item) => item.repoRoot))].sort()) {
+		lines.push(repoRoot);
+		for (const { branch, commits } of work.branches.filter((item) => item.repoRoot === repoRoot)) {
+			lines.push(`  ${branch}: ${commits.length} commit${commits.length === 1 ? "" : "s"} not in HEAD`);
+			lines.push(...commits.slice(0, 5).map((commit) => `    ${commit}`));
+			if (commits.length > 5) lines.push(`    … ${commits.length - 5} more`);
+		}
+		for (const { branch, path: checkout } of work.checkouts.filter((item) => item.repoRoot === repoRoot)) {
+			lines.push(`  ${branch}: checkout retained with uncommitted changes at ${checkout}`);
+		}
+	}
+	lines.push("Merge with `git merge --no-ff <branch>`; discard with `git branch -D <branch>` (and `git worktree remove` for a checkout).");
+	return lines.join("\n");
 }
 
 /** Delete run directories older than maxAgeDays. Returns the number removed. */
@@ -1443,6 +1566,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			);
 			if (reason === "startup") {
 				void pruneRunDirs(retentionDays(), { keepSessionId: ctx.sessionManager.getSessionId() }).catch(() => undefined);
+				if (ctx.hasUI) void notifyUnintegrated(ctx).catch(() => undefined);
 			}
 		}
 		updateAsyncWidget(ctx);
@@ -1451,12 +1575,26 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event) => {
 		const profiles = await subagentProfiles.list();
 		if (profiles.length === 0) return;
-		const isolated = profiles.filter((profile) => profile.worktree).map((profile) => profile.name);
-		event.systemPromptOptions.sections.agent_profiles =
-			`A valid &name reference is the user's explicit request to delegate asynchronously with that profile. Route every valid &name through ${ASYNC_TOOL}, including &worker. Compose a complete, self-contained task for every child. Do not add model, thinking, or tool overrides; the profile owns them. The caller controls the number and ordering of calls unless the user explicitly requests references or parallelism. Use ${BLOCKING_TOOL} only for a parent-selected blocking dependency.` +
-			(isolated.length
-				? ` Profiles ${isolated.join(", ")} run in isolated Git worktrees on their own branch and do not see uncommitted parent changes; review the reported commits, then integrate the branch yourself.`
-				: "");
+		event.systemPromptOptions.sections.agent_profiles = delegationGuidance(profiles.map((profile) => ({ name: profile.name, worktree: !!profile.worktree })));
+	});
+
+	async function notifyUnintegrated(ctx: ExtensionContext): Promise<void> {
+		const top = await git(pi, ctx.cwd, ["rev-parse", "--show-toplevel"]);
+		if (!top.ok || !top.out) return;
+		const work = await findUnintegratedWork(pi, await loadAllRecords(), { repoRoot: top.out });
+		const count = work.branches.length + work.checkouts.length;
+		if (count === 0 || shuttingDown) return;
+		ctx.ui.notify(
+			`${count} subagent branch${count === 1 ? "" : "es"} or checkout${count === 1 ? "" : "s"} here not integrated; /subagent-branches lists them.`,
+			"info",
+		);
+	}
+
+	pi.registerCommand?.("subagent-branches", {
+		description: "List subagent branches not in HEAD and checkouts retained with uncommitted changes",
+		handler: async (_args: string, ctx: ExtensionContext) => {
+			ctx.ui.notify(unintegratedText(await findUnintegratedWork(pi, await loadAllRecords())), "info");
+		},
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
