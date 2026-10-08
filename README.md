@@ -182,6 +182,13 @@ make -C extensions/tests test-subagents
 make -C extensions/tests test-euler
 ```
 
+## Commit
+
+`/commit [push] [instructions]` (`prompts/commit.md`) commits staged changes,
+or else this session's changes, in the repo's message style, with git or jj.
+Typing it is approval to commit. It never amends or forces, and it pushes only
+when you pass `push` and the branch already has an upstream.
+
 ## Recall
 
 `/recall <query>` searches recent Pi sessions plus local Markdown notes for prior
