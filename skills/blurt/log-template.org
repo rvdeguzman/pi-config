@@ -1,0 +1,39 @@
+#+title: <COURSE> — Blurting log
+#+filetags: :<course>:study:blurt:
+#+startup: overview
+
+* How a round works
+Run =/blurt= (it picks the topic) or =/blurt <topic>= from this course directory or below.
+1. *Cue:* Pi gives a topic title only. Close everything.
+2. *Blurt:* write or dictate everything you remember into the chat or the round file.
+3. *Check:* Pi grades against the sources (✓ ~ ✗ ∅) and points to them for the gaps.
+4. *Fill:* read only the pointed-to sections, then say =ready=.
+5. *Gap round:* 3–5 recall questions on the gaps only.
+6. *Log:* score, open gaps and next review date land below.
+
+* Exams
+- <name>: <Org timestamp>; <format and weight>
+
+* Sources
+In order of authority:
+1. <path or title>: <page offset, how to extract text>
+2. ...
+- Conventions: <notation and definitions the course uses>
+- Verification tools: <scripts or none>
+
+* Topics
+| # | slug | topic | source | last | score | next |
+|---+------+-------+--------+------+-------+------|
+
+* Open gaps
+
+* Round file template
+#+begin_src org
+,#+title: Blurt — <topic>
+,#+date: [<YYYY-MM-DD Day>]
+,#+filetags: :blurt:
+
+,* Blurt
+,* Check
+,* Gap round
+#+end_src
